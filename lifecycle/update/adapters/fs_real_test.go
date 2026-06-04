@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/fede-iglesias/shipkit/lifecycle/update"
 	"github.com/fede-iglesias/shipkit/lifecycle/update/adapters"
 )
 
@@ -725,5 +726,72 @@ func TestSnapshot_RandError(t *testing.T) {
 	_, err := a.Snapshot(context.Background(), srcFile, filepath.Join(dir, "snap"))
 	if !errors.Is(err, errRand) {
 		t.Errorf("expected errRand, got %v", err)
+	}
+}
+
+// buildTarGzWithEntry creates a tar.gz in memory with a single entry using the
+// provided header (no body content).
+func buildTarGzWithEntry(t *testing.T, hdr *tar.Header) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	if err := tw.WriteHeader(hdr); err != nil {
+		t.Fatalf("tar WriteHeader: %v", err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar Close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip Close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestExtractTarGz_RejectsPathTraversal checks that an entry with a name that
+// resolves outside destDir (e.g. "../escaped.bin") is rejected with ErrTarballEntryEscapes.
+func TestExtractTarGz_RejectsPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+
+	archiveData := buildTarGzWithEntry(t, &tar.Header{
+		Typeflag: tar.TypeReg,
+		Name:     "../escaped.bin",
+		Mode:     0o644,
+		Size:     0,
+	})
+	archivePath := filepath.Join(dir, "traversal.tar.gz")
+	if err := os.WriteFile(archivePath, archiveData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	a := adapters.NewRealFs()
+	err := a.ExtractTarGz(context.Background(), archivePath, destDir)
+	if !errors.Is(err, update.ErrTarballEntryEscapes) {
+		t.Errorf("expected ErrTarballEntryEscapes, got %v", err)
+	}
+}
+
+// TestExtractTarGz_RejectsSymlinkEntry checks that a symlink tar entry is rejected
+// with ErrTarballEntryEscapes.
+func TestExtractTarGz_RejectsSymlinkEntry(t *testing.T) {
+	dir := t.TempDir()
+
+	archiveData := buildTarGzWithEntry(t, &tar.Header{
+		Typeflag: tar.TypeSymlink,
+		Name:     "legit-looking.sh",
+		Linkname: "/etc/passwd",
+		Mode:     0o644,
+	})
+	archivePath := filepath.Join(dir, "symlink.tar.gz")
+	if err := os.WriteFile(archivePath, archiveData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	destDir := filepath.Join(dir, "extracted")
+	a := adapters.NewRealFs()
+	err := a.ExtractTarGz(context.Background(), archivePath, destDir)
+	if !errors.Is(err, update.ErrTarballEntryEscapes) {
+		t.Errorf("expected ErrTarballEntryEscapes, got %v", err)
 	}
 }
