@@ -60,6 +60,9 @@ if [ "$PCT" != "100.0" ]; then
   echo "  got:      $PCT%" >&2
   echo "  required: 100.0%" >&2
   echo "" >&2
+  echo "Uncovered functions:" >&2
+  go tool cover -func="$PROFILE" | awk '$3 != "100.0%" && !/^total:/ { print "  " $0 }' >&2
+  echo "" >&2
   echo "Move any untestable network-call functions to the consumer cmd/ layer" >&2
   echo "using the ErrNotConfigured sentinel pattern (sigstoreRealVerify style)." >&2
   exit 1
