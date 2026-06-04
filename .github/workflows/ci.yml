@@ -1,3 +1,18 @@
+# ci.yml - Continuous integration for the shipkit multi-module mono-repo.
+#
+# Purpose: build, vet, test, and check coverage for every Go module in the repo.
+# Invocation: triggered on push to main and on all pull requests.
+#
+# Structure:
+#   discover - finds all go.mod files and emits a JSON matrix of module directories.
+#   test     - matrix job per discovered module: vet, build, test with coverage,
+#              and coverage-gate.sh (100% for library modules; exempt for example/).
+#
+# GOWORK=off is set at the job level so each matrix cell tests in isolation using
+# go.mod resolution, not the local workspace. This mirrors what consumers see.
+#
+# To add a new module: create a directory with go.mod. CI picks it up automatically.
+
 name: CI
 
 on:
@@ -9,22 +24,61 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.find.outputs.packages }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - run: go vet ./...
-      - run: go build ./...
-      - run: go test -race ./...
+      - uses: actions/checkout@v6
 
-  staticcheck:
+      - name: Discover Go modules
+        id: find
+        run: |
+          set -euo pipefail
+          # Find every go.mod except the root workspace stub (if any) and vendor dirs.
+          # Emit a JSON array of directory paths relative to the repo root.
+          PKGS=$(find . -name go.mod \
+            -not -path './.git/*' \
+            -not -path './vendor/*' \
+            -exec dirname {} \; \
+            | sed 's|^\./||' \
+            | sort \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "packages=$PKGS" >> "$GITHUB_OUTPUT"
+          echo "discovered modules: $PKGS"
+
+  test:
+    needs: discover
     runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.discover.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
+
       - uses: actions/setup-go@v5
         with:
-          go-version-file: go.mod
-      - run: go run honnef.co/go/tools/cmd/staticcheck@latest ./...
+          go-version: '1.26.3'
+
+      - name: go vet (${{ matrix.package }})
+        working-directory: ${{ matrix.package }}
+        run: go vet ./...
+
+      - name: go build (${{ matrix.package }})
+        working-directory: ${{ matrix.package }}
+        run: go build ./...
+
+      - name: go test (${{ matrix.package }})
+        working-directory: ${{ matrix.package }}
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage gate (${{ matrix.package }})
+        working-directory: ${{ matrix.package }}
+        env:
+          # example/ modules are coverage-exempt: they are integration-wiring skeletons,
+          # not library packages. Set EXEMPT=1 for any module under example/.
+          EXEMPT: ${{ startsWith(matrix.package, 'example/') && '1' || '0' }}
+        run: bash "$GITHUB_WORKSPACE/.github/scripts/coverage-gate.sh" coverage.out "${{ matrix.package }}"

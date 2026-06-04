@@ -1,0 +1,119 @@
+# release.yml - Tag-triggered release workflow for shipkit multi-module packages.
+#
+# Purpose: when a tag matching <pkg>/v<version> (e.g. lifecycle/update/v0.1.0) or
+# a root v<version> tag is pushed, run tests for that module and create a GitHub
+# release at fede-iglesias/shipkit.
+#
+# Invocation: push a tag of the form '<pkg>/v*.*.*' or 'v*.*.*'. Examples:
+#   git tag frontmatter/v0.1.0 && git push origin frontmatter/v0.1.0
+#   git tag lifecycle/update/v0.1.0 && git push origin lifecycle/update/v0.1.0
+#
+# Permissions:
+#   contents: write  - create GitHub releases
+#   id-token: write  - reserved for future cosign keyless signing of release notes
+#                      (B5 cancha adds signing; structurally ready here)
+#
+# Tag parsing convention:
+#   - Tag 'lifecycle/update/v0.1.0' -> pkg dir 'lifecycle/update', version 'v0.1.0'
+#   - Tag 'v0.1.0' (root)           -> pkg dir '.', version 'v0.1.0'
+#   - Any other shape is rejected with a clear error message.
+#
+# GOWORK=off is set at the job level so the release gate tests against published
+# go.mod dependencies, not local workspace siblings.
+
+name: Release Package
+
+on:
+  push:
+    tags:
+      - '*/v*.*.*'
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. lifecycle/update/v0.1.0 or v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release-package:
+    runs-on: ubuntu-latest
+    env:
+      GOWORK: off
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Parse tag and resolve module directory
+        id: parse
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          # Extract version: everything from the last '/v' segment onward.
+          # Extract pkg dir: everything before the last '/v' segment.
+          # Root tag 'v0.1.0' has no slash prefix -> pkg dir is '.'.
+          if echo "$TAG" | grep -qE '^v[0-9]'; then
+            PKG="."
+            VERSION="$TAG"
+          else
+            PKG="${TAG%/v*}"
+            VERSION="v${TAG##*/v}"
+            if [ -z "$PKG" ] || [ "$PKG" = "$TAG" ]; then
+              echo "ERROR: tag must be <pkg>/v<version> or v<version>, got: $TAG" >&2
+              exit 1
+            fi
+          fi
+          if [ "$PKG" != "." ] && [ ! -d "$PKG" ]; then
+            echo "ERROR: package directory '$PKG' does not exist" >&2
+            exit 1
+          fi
+          MODFILE="${PKG}/go.mod"
+          if [ "$PKG" = "." ]; then
+            MODFILE="go.mod"
+          fi
+          if [ ! -f "$MODFILE" ]; then
+            echo "ERROR: $MODFILE not found (multi-module convention violated)" >&2
+            exit 1
+          fi
+          echo "pkg=$PKG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "modfile=$MODFILE" >> "$GITHUB_OUTPUT"
+          echo "parsed: pkg=$PKG version=$VERSION tag=$TAG"
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ steps.parse.outputs.modfile }}
+
+      - name: go vet + tests for ${{ steps.parse.outputs.pkg }}
+        working-directory: ${{ steps.parse.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Coverage gate (100% floor for shipkit library modules)
+        working-directory: ${{ steps.parse.outputs.pkg }}
+        run: |
+          set -euo pipefail
+          bash "$GITHUB_WORKSPACE/.github/scripts/coverage-gate.sh" coverage.out "${{ steps.parse.outputs.pkg }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.parse.outputs.tag }}
+          PKG: ${{ steps.parse.outputs.pkg }}
+          VERSION: ${{ steps.parse.outputs.version }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --title "$PKG $VERSION" \
+            --generate-notes \
+            --notes "Install: \`go get github.com/fede-iglesias/shipkit/$PKG@$VERSION\`"

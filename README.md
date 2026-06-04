@@ -1,70 +1,101 @@
 # shipkit
 
-> Toolkit de Go para construir apps de terminal que se ven bien y se instalan, actualizan y diagnostican solas.
+Cobra lifecycle toolkit for personal Go CLIs (install / update / uninstall / doctor / clean).
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/fede-iglesias/shipkit.svg)](https://pkg.go.dev/github.com/fede-iglesias/shipkit)
 [![CI](https://github.com/fede-iglesias/shipkit/actions/workflows/ci.yml/badge.svg)](https://github.com/fede-iglesias/shipkit/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> [!WARNING]
-> En desarrollo temprano. La API se mueve hasta el primer tag estable (`v1`).
+## Status
 
-`shipkit` es la base reutilizable para construir CLIs/TUIs en Go con un ciclo de
-vida self-contained: el mismo binario se instala, se actualiza desde GitHub
-releases (repos privados o públicos, vía la sesión de `gh`), se diagnostica y se
-desinstala solo. Encima trae un kit de componentes de terminal listos para
-componer.
+v0.1.0 in progress. Multi-module mono-repo: each lifecycle verb and primitive is
+its own Go module so consumers only take what they need. Individual modules reach
+v0.1.0 after their extract batch lands. See CHANGELOG for progress.
 
-## Arquitectura en capas
+## Install
 
-La dependencia apunta **siempre hacia abajo**. La base (los sub-paquetes de `ui`
-y `theme`) es agnóstica de todo lo que tiene encima; las pantallas y el lifecycle
-componen la base. Un widget de `ui` nunca importa `lifecycle` ni `screens`.
+Root module (wires all verbs):
 
-```
-app/         struct App{} + Build()    ← tu app configura acá
-screens/     menu · dashboard · logs   ← TUIs que componen lo de abajo
-lifecycle/   install · update · uninstall · doctor · clean
-ui/ + theme/ base: widgets agnósticos de paleta + estilos
+```bash
+go get github.com/fede-iglesias/shipkit@latest
 ```
 
-## Instalación
+Individual modules (after their respective batch lands in v0.1.0):
 
-```sh
-go get github.com/fede-iglesias/shipkit
+```bash
+go get github.com/fede-iglesias/shipkit/lifecycle/update@latest
+go get github.com/fede-iglesias/shipkit/lifecycle/install@latest
+go get github.com/fede-iglesias/shipkit/frontmatter@latest
+go get github.com/fede-iglesias/shipkit/store@latest
 ```
 
-## Quick start
+## Quickstart
+
+Wire all five lifecycle verbs into a cobra root in one call:
 
 ```go
-// cmd/miapp/main.go
-package main
-
 import (
-	"context"
-	"os"
-
-	"github.com/charmbracelet/fang"
-	"github.com/fede-iglesias/shipkit"
-	"github.com/fede-iglesias/shipkit/app"
+    "github.com/fede-iglesias/shipkit"
+    "github.com/spf13/cobra"
 )
 
-var version = "dev" // inyectado con -ldflags en el build
-
 func main() {
-	a := app.App{
-		Name:       "miapp",
-		BinaryName: "miapp",
-		Repo:       "tu-usuario/miapp",
-		Version:    version,
-	}
-	// install / update / uninstall / doctor / menu vienen gratis.
-	root := shipkit.Build(a)
-	_ = fang.Execute(context.Background(), root)
-	os.Exit(0)
+    root := &cobra.Command{Use: "myapp"}
+    cfg := shipkit.Config{
+        AppName:   "myapp",
+        Repo:      "your-org/tools",  // fede-iglesias/tools for personal CLIs
+        TagPrefix: "myapp-",
+        Version:   version,           // injected via -ldflags at build time
+    }
+    // RegisterLifecycle adds install / update / uninstall / doctor / clean subcommands.
+    if err := shipkit.RegisterLifecycle(root, cfg); err != nil {
+        log.Fatal(err)
+    }
+    root.Execute()
 }
 ```
 
-## Licencia
+The full API (`RegisterLifecycle`, `Config`, per-verb getters, `Option` variants)
+stabilizes when v0.1.0 lands after the extract batches complete.
 
-[MIT](LICENSE) © 2026 Fede Iglesias
+## Architecture
+
+shipkit is structured in two phases:
+
+1. **Extract base**: primitive packages ported from an existing production CLI
+   (`frontmatter`, `store`, `lifecycle/migrations`, `lifecycle/update`) with full
+   test suites preserved.
+
+2. **New verbs**: lifecycle verbs written from scratch (`install`, `uninstall`,
+   `doctor`, `clean`) and the public `shipkit` root that wires them all via
+   `RegisterLifecycle`.
+
+All packages use the hexagonal ports pattern: each verb accepts IO interface
+arguments (HTTP, FS, Cosign, Spawn, Paths, Env, etc.) so unit tests can swap in
+fakes and achieve 100% statement coverage without network calls.
+
+## Modules
+
+| Module path | Purpose | Target tag |
+|-------------|---------|------------|
+| `github.com/fede-iglesias/shipkit` | Root: Config, RegisterLifecycle, wiring | `v0.1.0` |
+| `github.com/fede-iglesias/shipkit/frontmatter` | YAML frontmatter round-trip | `frontmatter/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/store` | Atomic write, file lock, checksum | `store/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/migrations` | Ordered migration registry | `lifecycle/migrations/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/update` | Cosign-verified atomic self-update | `lifecycle/update/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/install` | Config dirs, completions, autostart | `lifecycle/install/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/uninstall` | Clean removal | `lifecycle/uninstall/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/doctor` | Health checks | `lifecycle/doctor/v0.1.0` |
+| `github.com/fede-iglesias/shipkit/lifecycle/clean` | Snapshot and cache pruning | `lifecycle/clean/v0.1.0` |
+
+## Distribution
+
+shipkit packages publish via the standard Go module proxy (pkg.go.dev). Consumers
+that build CLIs on top of shipkit ship their binaries via their own release
+pipeline. See `kt` for the reference setup: goreleaser, cosign keyless signing,
+and publishing to a separate public `tools` repo that hosts the install.sh and
+release assets.
+
+## License
+
+[MIT](LICENSE)

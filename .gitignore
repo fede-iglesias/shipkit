@@ -1,19 +1,14 @@
-# Binaries
-*.exe
-*.dll
-*.so
-*.dylib
-/bin/
-/dist/
-
-# Test & coverage
-*.test
-*.out
-coverage.*
-
-# Go workspace files (used for local cross-repo dev; never committed)
+# Go workspace files (used for local cross-module dev; never committed)
 go.work
 go.work.sum
+
+# Build output
+dist/
+
+# Test and coverage
+coverage.out
+coverage.txt
+*.test
 
 # OS / editor noise
 .DS_Store
