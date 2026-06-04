@@ -26,7 +26,7 @@ name: Release Package
 on:
   push:
     tags:
-      - '*/v*.*.*'
+      - '**/v*.*.*'
       - 'v*.*.*'
   workflow_dispatch:
     inputs:
