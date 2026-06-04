@@ -1,0 +1,22 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+
+# Test & coverage
+*.test
+*.out
+coverage.*
+
+# Go workspace files (used for local cross-repo dev; never committed)
+go.work
+go.work.sum
+
+# OS / editor noise
+.DS_Store
+*.swp
+.idea/
+.vscode/
