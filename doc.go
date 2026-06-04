@@ -42,12 +42,13 @@
 //	func main() {
 //	    root := &cobra.Command{Use: "myapp"}
 //	    cfg := shipkit.Config{
-//	        AppName:   "myapp",
-//	        Repo:      "your-org/tools",
-//	        TagPrefix: "myapp-",
-//	        Version:   version, // injected via -ldflags
-//	    }
-//	    // API stabilizes in v0.1.0; signature shown is the target consumer pattern.
+//	        AppName:    "myapp",
+//	        BinaryName: "myapp",
+//	        Repo:       "owner/tools",
+//	        TagPrefix:  "myapp-",
+//	        Version:    "0.1.0", // injected via -ldflags at build time
+//	        BinaryPath: "/usr/local/bin/myapp",
+//	    }.WithDefaults()
 //	    if err := shipkit.RegisterLifecycle(root, cfg); err != nil {
 //	        log.Fatal(err)
 //	    }

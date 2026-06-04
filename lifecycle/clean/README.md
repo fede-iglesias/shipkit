@@ -16,8 +16,6 @@ Use `lifecycle/clean` when:
 package main
 
 import (
-    "context"
-    "log"
     "os"
 
     "github.com/fede-iglesias/shipkit/adapters"
@@ -27,11 +25,11 @@ import (
 
 func main() {
     deps := clean.Deps{
-        AppName: "myapp",
-        FS:      adapters.NewRealFsPort(),
-        Paths:   adapters.NewXDGPathsPort(),
-        Clock:   adapters.NewRealClockPort(),
-        Prompt:  adapters.NewTermPromptPort(),
+        AppName:           "myapp",
+        FS:                adapters.NewRealFs(),
+        Paths:             adapters.NewPathsXDG(),
+        Clock:             adapters.NewRealClock(),
+        Prompt:            adapters.NewPromptTerm(),
         ListSnapshotsFunc: clean.DefaultListSnapshots,
         ListTmpFunc:       clean.DefaultListTmp,
         ListCacheFunc:     clean.DefaultListCache,
@@ -45,8 +43,6 @@ func main() {
     if err := root.Execute(); err != nil {
         os.Exit(1)
     }
-    _ = context.Background() // referenced above
-    log.SetFlags(0)
 }
 ```
 
