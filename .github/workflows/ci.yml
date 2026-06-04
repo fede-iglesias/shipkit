@@ -78,7 +78,9 @@ jobs:
       - name: Coverage gate (${{ matrix.package }})
         working-directory: ${{ matrix.package }}
         env:
-          # example/ modules are coverage-exempt: they are integration-wiring skeletons,
-          # not library packages. Set EXEMPT=1 for any module under example/.
-          EXEMPT: ${{ startsWith(matrix.package, 'example/') && '1' || '0' }}
+          # Coverage-exempt modules:
+          # - example/* : integration-wiring skeletons, not library packages.
+          # - internal/testserver/cmd : cmd-only binary (main + handlers wired by main).
+          #   Library code lives in internal/testserver/ and is gated at 100%.
+          EXEMPT: ${{ (startsWith(matrix.package, 'example/') || matrix.package == 'internal/testserver/cmd') && '1' || '0' }}
         run: bash "$GITHUB_WORKSPACE/.github/scripts/coverage-gate.sh" coverage.out "${{ matrix.package }}"
