@@ -645,6 +645,15 @@ func (p *simpleRemoveDirPort) RemoveDir(_ context.Context, dir string) error {
 	p.calls = append(p.calls, dir)
 	return nil
 }
+func (p *simpleRemoveDirPort) MkdirAll(_ context.Context, _ string, _ fs.FileMode) error {
+	return nil
+}
+func (p *simpleRemoveDirPort) ReadFile(_ context.Context, _ string) ([]byte, error) {
+	return nil, nil
+}
+func (p *simpleRemoveDirPort) AtomicWrite(_ context.Context, _ string, _ []byte, _ fs.FileMode) error {
+	return nil
+}
 
 type simplePathsPort struct{ dataRoot string }
 
