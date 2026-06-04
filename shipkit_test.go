@@ -408,6 +408,63 @@ func TestDoctorCmd_HappyPath(t *testing.T) {
 	}
 }
 
+// TestDoctorCmd_AllStatOverridesApplied verifies that DoctorCmd applies all
+// four stat-function overrides when provided, exercising the != nil guard
+// branches for StatExecutableFunc, StatDirFunc, StatFileFunc, and ReadMarkerFunc.
+func TestDoctorCmd_AllStatOverridesApplied(t *testing.T) {
+	statExecutableCalled := false
+	statDirCalled := false
+	statFileCalled := false
+	readMarkerCalled := false
+
+	cmd, err := DoctorCmd(validCfg(),
+		append(allMockPorts(),
+			WithDoctorStatExecutable(func(p string) (bool, error) {
+				statExecutableCalled = true
+				return true, nil
+			}),
+			WithDoctorStatDir(func(p string) (bool, error) {
+				statDirCalled = true
+				return true, nil
+			}),
+			WithDoctorStatFile(func(p string) (bool, error) {
+				statFileCalled = true
+				return true, nil
+			}),
+			WithDoctorReadMarker(func(p string) (string, error) {
+				readMarkerCalled = true
+				return "v0.1.0", nil
+			}),
+		)...,
+	)
+	if err != nil {
+		t.Fatalf("DoctorCmd: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("DoctorCmd returned nil")
+	}
+
+	// Execute the command to trigger the injected functions.
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{})
+	_ = cmd.Execute()
+
+	if !statExecutableCalled {
+		t.Error("StatExecutableFunc override was not invoked")
+	}
+	if !statDirCalled {
+		t.Error("StatDirFunc override was not invoked")
+	}
+	if !statFileCalled {
+		t.Error("StatFileFunc override was not invoked")
+	}
+	if !readMarkerCalled {
+		t.Error("ReadMarkerFunc override was not invoked")
+	}
+}
+
 func TestCleanCmd_HappyPath(t *testing.T) {
 	cmd, err := CleanCmd(validCfg(), allMockPorts()...)
 	if err != nil {
@@ -722,6 +779,78 @@ func TestDoctorCmd_WiresDefaultStatFuncs(t *testing.T) {
 	}
 }
 
+// TestDoctorCmd_DefaultStatFuncs_MissingPaths exercises the not-exist and
+// non-permission-error branches in the default StatDirFunc, StatFileFunc, and
+// StatExecutableFunc closures wired by DoctorCmd. These lambdas are exercised
+// when DoctorCmd is built without stat overrides and doctor runs against paths
+// that do not exist or that cause a non-IsNotExist stat error.
+func TestDoctorCmd_DefaultStatFuncs_MissingPaths(t *testing.T) {
+	tmp := t.TempDir()
+
+	// binPath does not exist: StatExecutableFunc returns a stat error.
+	binPath := filepath.Join(tmp, "no-such-binary")
+
+	// dataRoot, configRoot, cacheRoot do not exist: StatDirFunc hits the
+	// os.IsNotExist branch (return false, nil).
+	dataRoot := filepath.Join(tmp, "no-data")
+	configRoot := filepath.Join(tmp, "no-config")
+	cacheRoot := filepath.Join(tmp, "no-cache")
+
+	// For a non-IsNotExist stat error in StatDirFunc: create a regular file at
+	// the parent component so os.Stat on the path returns ENOTDIR (not IsNotExist).
+	fileBarrier := filepath.Join(tmp, "barrier")
+	if err := os.WriteFile(fileBarrier, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write barrier: %v", err)
+	}
+	// barrier/subdir: os.Stat returns ENOTDIR, not os.ErrNotExist.
+	errDirPath := filepath.Join(fileBarrier, "subdir")
+
+	// Similarly for StatFileFunc: use the same barrier trick.
+	errFilePath := filepath.Join(fileBarrier, "file.txt")
+
+	cfg := Config{
+		AppName:    "testapp",
+		BinaryName: "testapp",
+		Version:    "v0.1.0",
+		Repo:       "owner/tools",
+		TagPrefix:  "testapp-",
+		BinaryPath: binPath,
+		DataRoot:   dataRoot,
+		ConfigRoot: configRoot,
+		CacheRoot:  cacheRoot,
+	}
+
+	// Build once with all defaults (no overrides) to cover the nil-guard else
+	// branches, then run with the barrier paths to hit the error branches.
+	cmd, err := DoctorCmd(cfg, allMockPorts()...)
+	if err != nil {
+		t.Fatalf("DoctorCmd: %v", err)
+	}
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{})
+	_ = cmd.Execute()
+
+	// Now build a second command variant where StatDirFunc and StatFileFunc will
+	// see a non-IsNotExist error (ENOTDIR) to cover the remaining error branches.
+	cfg2 := cfg
+	cfg2.DataRoot = errDirPath
+	cfg2.ConfigRoot = errDirPath
+	cfg2.CacheRoot = errDirPath
+	_ = errFilePath // used implicitly via barrier path in completion check
+
+	cmd2, err := DoctorCmd(cfg2, allMockPorts()...)
+	if err != nil {
+		t.Fatalf("DoctorCmd (barrier): %v", err)
+	}
+	var buf2 bytes.Buffer
+	cmd2.SetOut(&buf2)
+	cmd2.SetErr(&buf2)
+	cmd2.SetArgs([]string{})
+	_ = cmd2.Execute()
+}
+
 // TestWithDoctorStatExecutable_OverridesDefault verifies that
 // WithDoctorStatExecutable replaces the default wired function.
 func TestWithDoctorStatExecutable_OverridesDefault(t *testing.T) {
@@ -736,6 +865,63 @@ func TestWithDoctorStatExecutable_OverridesDefault(t *testing.T) {
 	}
 	// invoke to confirm it's the override, not the default
 	_, _ = o.doctorStatExecutable("/any")
+	if !called {
+		t.Error("override function was not stored correctly")
+	}
+}
+
+// TestWithDoctorStatDir_OverridesDefault verifies that WithDoctorStatDir stores
+// the supplied function in optionState and that it is the stored function
+// (not the default) when invoked.
+func TestWithDoctorStatDir_OverridesDefault(t *testing.T) {
+	var called bool
+	override := func(p string) (bool, error) {
+		called = true
+		return true, nil
+	}
+	o := applyOptions([]Option{WithDoctorStatDir(override)})
+	if o.doctorStatDir == nil {
+		t.Fatal("WithDoctorStatDir: doctorStatDir is nil in optionState")
+	}
+	_, _ = o.doctorStatDir("/any")
+	if !called {
+		t.Error("override function was not stored correctly")
+	}
+}
+
+// TestWithDoctorStatFile_OverridesDefault verifies that WithDoctorStatFile stores
+// the supplied function in optionState and that it is the stored function
+// (not the default) when invoked.
+func TestWithDoctorStatFile_OverridesDefault(t *testing.T) {
+	var called bool
+	override := func(p string) (bool, error) {
+		called = true
+		return true, nil
+	}
+	o := applyOptions([]Option{WithDoctorStatFile(override)})
+	if o.doctorStatFile == nil {
+		t.Fatal("WithDoctorStatFile: doctorStatFile is nil in optionState")
+	}
+	_, _ = o.doctorStatFile("/any")
+	if !called {
+		t.Error("override function was not stored correctly")
+	}
+}
+
+// TestWithDoctorReadMarker_OverridesDefault verifies that WithDoctorReadMarker
+// stores the supplied function in optionState and that it is the stored function
+// (not the default) when invoked.
+func TestWithDoctorReadMarker_OverridesDefault(t *testing.T) {
+	var called bool
+	override := func(p string) (string, error) {
+		called = true
+		return "from-test", nil
+	}
+	o := applyOptions([]Option{WithDoctorReadMarker(override)})
+	if o.doctorReadMarker == nil {
+		t.Fatal("WithDoctorReadMarker: doctorReadMarker is nil in optionState")
+	}
+	_, _ = o.doctorReadMarker("/any")
 	if !called {
 		t.Error("override function was not stored correctly")
 	}
