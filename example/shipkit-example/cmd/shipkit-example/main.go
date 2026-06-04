@@ -50,7 +50,7 @@ Use it as a starting template when creating a new personal CLI.`,
 		Version:    Version,
 		BinaryPath: self,
 	}
-	cfg = cfg.WithDefaults()
+	// WithDefaults is called by RegisterLifecycle; no need to call it here.
 
 	cos := adapters.NewSigstoreCosign()
 	cos.CertIdentityRegex = `https://github\.com/fede-iglesias/shipkit/.*`

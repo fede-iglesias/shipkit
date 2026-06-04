@@ -174,13 +174,21 @@ jobs:
 
           # Set up isolated XDG dirs.
           XDG_ROOT="$(mktemp -d)"
-          echo "XDG_ROOT=${XDG_ROOT}" >> "$GITHUB_ENV"
-          echo "XDG_DATA_HOME=${XDG_ROOT}/data" >> "$GITHUB_ENV"
-          echo "XDG_CONFIG_HOME=${XDG_ROOT}/config" >> "$GITHUB_ENV"
-          echo "XDG_CACHE_HOME=${XDG_ROOT}/cache" >> "$GITHUB_ENV"
           HOME_DIR="${XDG_ROOT}/home"
           mkdir -p "${HOME_DIR}"
           touch "${HOME_DIR}/.zshrc" "${HOME_DIR}/.bashrc"
+
+          # Export into the current shell so the binary inherits them immediately.
+          export XDG_DATA_HOME="${XDG_ROOT}/data"
+          export XDG_CONFIG_HOME="${XDG_ROOT}/config"
+          export XDG_CACHE_HOME="${XDG_ROOT}/cache"
+          export HOME="${HOME_DIR}"
+
+          # Persist to GITHUB_ENV so subsequent steps see the same dirs.
+          echo "XDG_ROOT=${XDG_ROOT}" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=${XDG_DATA_HOME}" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=${XDG_CONFIG_HOME}" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=${XDG_CACHE_HOME}" >> "$GITHUB_ENV"
           echo "HOME=${HOME_DIR}" >> "$GITHUB_ENV"
 
           # Run install --yes.
