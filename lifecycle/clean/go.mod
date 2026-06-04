@@ -4,7 +4,7 @@ go 1.26.3
 
 require (
 	github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0
-	github.com/fede-iglesias/shipkit/ports v0.1.0
+	github.com/fede-iglesias/shipkit/ports v0.2.0
 	github.com/spf13/cobra v1.10.2
 )
 
