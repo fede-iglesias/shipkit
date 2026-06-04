@@ -10,6 +10,33 @@ import (
 	updateadapters "github.com/fede-iglesias/shipkit/lifecycle/update/adapters"
 )
 
+// atomicWriteCommit is a seam for tests: it receives the open temp file and
+// performs the write, chmod, close, and rename steps. Production code MUST NOT
+// replace this var; it exists solely to make the error paths unit-testable.
+var atomicWriteCommit = func(tmp *os.File, data []byte, perm fs.FileMode, finalPath string) error {
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("atomic write: write: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("atomic write: chmod: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write: close: %w", err)
+	}
+	if err := os.Rename(tmpName, finalPath); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write: rename: %w", err)
+	}
+	return nil
+}
+
 // RealFsAdapter is the production implementation of
 // [github.com/fede-iglesias/shipkit/ports.FsPort]. It wraps
 // [lifecycle/update/adapters.RealFsAdapter] (which covers Snapshot, Restore,
@@ -109,25 +136,5 @@ func (a *RealFsAdapter) AtomicWrite(ctx context.Context, path string, data []byt
 	if err != nil {
 		return fmt.Errorf("atomic write: create temp: %w", err)
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		cleanup()
-		return fmt.Errorf("atomic write: write: %w", err)
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		cleanup()
-		return fmt.Errorf("atomic write: chmod: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write: close: %w", err)
-	}
-	if err := os.Rename(tmpName, path); err != nil {
-		cleanup()
-		return fmt.Errorf("atomic write: rename: %w", err)
-	}
-	return nil
+	return atomicWriteCommit(tmp, data, perm, path)
 }
