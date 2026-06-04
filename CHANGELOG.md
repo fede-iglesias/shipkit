@@ -6,6 +6,37 @@ per published Go module.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-04
+
+### Added
+
+- `WithMigrations(...migrations.Migration)` option: consumers can register
+  update migrations on the orchestrator via `UpdateCmd`; migrations are applied
+  in semver ascending order during an update run.
+- `WithDoctorStatExecutable`, `WithDoctorStatDir`, `WithDoctorStatFile`,
+  `WithDoctorReadMarker` options: override individual stat / read funcs wired
+  by `DoctorCmd`; replaces the nil-fallback "not wired" behaviour with explicit
+  os-backed defaults.
+- `lifecycle/recovery v0.1.0` (new module): shared recovery-manifest contract
+  used by update, clean, and doctor. Consumers gain a dependency on this module
+  when importing any of the affected lifecycle verbs.
+
+### Changed
+
+- `DoctorCmd` now wires os-backed default implementations for
+  `StatExecutableFunc`, `StatDirFunc`, `StatFileFunc`, and `ReadMarkerFunc`
+  when the consumer does not supply overrides; no more nil-fallback silent skips
+  in production runs.
+- `UpdateCmd` now reads `SHIPKIT_RELEASES_BASE` and `SHIPKIT_SKIP_VERIFY` env
+  vars; useful for cancha / integration-test workflows against a local
+  testserver.
+
+### Changed (dependency graph)
+
+- Bumps to `ports v0.2.0`, `adapters v0.2.0`, `lifecycle/update v0.2.0`,
+  `lifecycle/install v0.2.0`, `lifecycle/clean v0.2.0`, `lifecycle/doctor v0.2.0`.
+- Adds `lifecycle/recovery v0.1.0` (new).
+
 ## [0.1.0] - 2026-06-04
 
 ### Added

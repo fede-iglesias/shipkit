@@ -5,6 +5,21 @@ All notable changes to this module will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this module adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-04
+
+### Changed
+
+- All filesystem I/O in `install.go` now routes through `ports.FsPort`:
+  `deps.FS.MkdirAll` replaces `os.MkdirAll`, `deps.FS.ReadFile` replaces
+  `os.ReadFile`, and `deps.FS.AtomicWrite` replaces `os.CreateTemp` + `os.Rename`.
+- `readMarker` accepts `ctx` and `deps` instead of reading the file directly;
+  internally calls `deps.FS.ReadFile`.
+
+### Removed
+
+- Internal `atomicWriteBytes` / `atomicWriteBytesHooked` helpers and their
+  associated `atomicWriteHooks` struct; replaced by `deps.FS.AtomicWrite`.
+
 ## [0.1.0] - 2026-06-04
 
 ### Added

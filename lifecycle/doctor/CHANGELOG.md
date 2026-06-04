@@ -7,6 +7,21 @@ This module uses [semantic versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-06-04
+
+### Changed
+
+- `checkRecoveryManifest` now calls `recovery.Read` directly via
+  `lifecycle/recovery`; `StatFileFunc` is no longer used for manifest
+  detection. The check returns `StatusFail` when the manifest is present and
+  parses, `StatusPass` when absent, and `StatusWarn` on any other read error.
+- Manifest file path uses `recovery.Path(deps.DataRoot)` instead of a
+  hardcoded string.
+
+### Added
+
+- `require github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0`.
+
 ## [0.1.0] - 2026-06-04
 
 ### Added

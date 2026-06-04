@@ -5,6 +5,23 @@ All notable changes to shipkit/lifecycle/clean are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-06-04
+
+### Changed
+
+- Recovery-manifest read now uses canonical `lifecycle/recovery.Read` and
+  `recovery.Path`; `DefaultReadManifest` delegates to `recovery.Read` instead
+  of parsing JSON locally.
+- `RecoveryManifest` in `Deps.ReadManifestFunc` signature replaced by
+  `*recovery.Manifest` from `lifecycle/recovery`; local `RecoveryManifest`
+  struct removed.
+- `collectSnapshots` uses `recovery.Path(dataDir)` for the manifest file path
+  instead of a hardcoded string.
+
+### Added
+
+- `require github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0`.
+
 ## [0.1.0] - 2026-06-04
 
 ### Added

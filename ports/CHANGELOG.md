@@ -3,6 +3,16 @@
 All notable changes to shipkit/ports are documented here.
 Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] - 2026-06-04
+
+### Added
+
+- `FsPort.MkdirAll(ctx, path, perm)` method.
+- `FsPort.ReadFile(ctx, path)` method.
+- `FsPort.AtomicWrite(ctx, path, data, perm)` method.
+- `MockFsPort` extended with `MkdirAllFunc`, `ReadFileFunc`, `AtomicWriteFunc`
+  fields; `NewMockFsPort()` wires safe no-op defaults for all three.
+
 ## [0.1.0] - 2026-06-04
 
 ### Added
