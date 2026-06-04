@@ -114,3 +114,61 @@ func TestPath_JoinsDataRootAndFilename(t *testing.T) {
 		t.Errorf("Path: got %q, want %q", got, want)
 	}
 }
+
+// TestManifest_WriteParentMissing_ReturnsError asserts that Write surfaces an
+// error when the manifest's parent directory does not exist. This locks in the
+// contract documented on Write that the parent must already exist.
+func TestManifest_WriteParentMissing_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "missing-subdir", recovery.Filename)
+
+	err := recovery.Write(path, recovery.Manifest{Version: 1, AppName: "x", CreatedAt: time.Now().UTC()})
+	if err == nil {
+		t.Fatal("Write: expected error for missing parent dir, got nil")
+	}
+	if !strings.Contains(err.Error(), "create temp") {
+		t.Errorf("Write: expected wrapped create-temp error, got %v", err)
+	}
+}
+
+// TestManifest_ReadReturnsNonNotExistError asserts that Read returns a non
+// fs.ErrNotExist error when the path exists but is not a regular file
+// (a directory in this case). Callers rely on the NotExist distinction to
+// branch between "no recovery pending" and "IO error".
+func TestManifest_ReadReturnsNonNotExistError(t *testing.T) {
+	dir := t.TempDir()
+	// Make the manifest path a directory so os.ReadFile returns is-a-directory.
+	path := filepath.Join(dir, recovery.Filename)
+	if err := os.Mkdir(path, 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
+
+	_, err := recovery.Read(path)
+	if err == nil {
+		t.Fatal("Read: expected error for directory path, got nil")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Read: error must NOT satisfy errors.Is(_, fs.ErrNotExist) when path is a directory, got %v", err)
+	}
+}
+
+// TestManifest_ReadInvalidJSON_ReturnsError asserts that malformed JSON at the
+// manifest path surfaces as a non-NotExist error so callers report Warn.
+func TestManifest_ReadInvalidJSON_ReturnsError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, recovery.Filename)
+	if err := os.WriteFile(path, []byte("{not valid json"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	_, err := recovery.Read(path)
+	if err == nil {
+		t.Fatal("Read: expected error for invalid JSON, got nil")
+	}
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Read: error must NOT satisfy errors.Is(_, fs.ErrNotExist) for invalid JSON, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "unmarshal") {
+		t.Errorf("Read: expected wrapped unmarshal error, got %v", err)
+	}
+}
