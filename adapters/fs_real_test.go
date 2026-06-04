@@ -145,6 +145,115 @@ func TestRealFsAdapter_RemoveDir_FnError(t *testing.T) {
 	}
 }
 
+// TestRealFsAdapter_MkdirAll_CreatesNestedDirs verifies that MkdirAll creates
+// all intermediate directories under the given path.
+func TestRealFsAdapter_MkdirAll_CreatesNestedDirs(t *testing.T) {
+	tmp := t.TempDir()
+	target := filepath.Join(tmp, "a/b/c")
+
+	a := NewRealFs()
+	if err := a.MkdirAll(context.Background(), target, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	info, err := os.Stat(target)
+	if err != nil {
+		t.Fatalf("Stat after MkdirAll: %v", err)
+	}
+	if !info.IsDir() {
+		t.Errorf("expected %s to be a directory", target)
+	}
+}
+
+// TestRealFsAdapter_ReadFile_ReturnsContent writes a temp file and verifies
+// ReadFile returns the exact bytes that were written.
+func TestRealFsAdapter_ReadFile_ReturnsContent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "data.txt")
+	want := []byte("hello readfile")
+
+	if err := os.WriteFile(path, want, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := NewRealFs()
+	got, err := a.ReadFile(context.Background(), path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("content = %q; want %q", got, want)
+	}
+}
+
+// TestRealFsAdapter_ReadFile_NotFound verifies ReadFile returns error for missing file.
+func TestRealFsAdapter_ReadFile_NotFound(t *testing.T) {
+	a := NewRealFs()
+	_, err := a.ReadFile(context.Background(), "/nonexistent/path/file.txt")
+	if err == nil {
+		t.Fatal("want error for missing file; got nil")
+	}
+}
+
+// TestRealFsAdapter_AtomicWrite_WritesContentAndChmod verifies that AtomicWrite
+// writes the expected content to the path and applies the given permission mode.
+func TestRealFsAdapter_AtomicWrite_WritesContentAndChmod(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "output.txt")
+	want := []byte("atomic content")
+
+	a := NewRealFs()
+	if err := a.AtomicWrite(context.Background(), path, want, 0o755); err != nil {
+		t.Fatalf("AtomicWrite: %v", err)
+	}
+
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile after AtomicWrite: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("content = %q; want %q", got, want)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o755 {
+		t.Errorf("mode = %o; want 0755", info.Mode().Perm())
+	}
+}
+
+// TestRealFsAdapter_AtomicWrite_LeavesNoTempOnSuccess verifies that no
+// .shipkit-atomic-* temp files remain after a successful atomic write.
+func TestRealFsAdapter_AtomicWrite_LeavesNoTempOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.txt")
+
+	a := NewRealFs()
+	if err := a.AtomicWrite(context.Background(), path, []byte("data"), 0o644); err != nil {
+		t.Fatalf("AtomicWrite: %v", err)
+	}
+
+	matches, err := filepath.Glob(filepath.Join(dir, ".shipkit-atomic-*"))
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matches) > 0 {
+		t.Errorf("temp files remain after successful write: %v", matches)
+	}
+}
+
+// TestRealFsAdapter_AtomicWrite_BadDir verifies that AtomicWrite returns an
+// error when the parent directory does not exist.
+func TestRealFsAdapter_AtomicWrite_BadDir(t *testing.T) {
+	a := NewRealFs()
+	err := a.AtomicWrite(context.Background(), "/nonexistent/dir/file.txt", []byte("x"), 0o644)
+	if err == nil {
+		t.Fatal("want error writing to nonexistent dir; got nil")
+	}
+}
+
 // TestDefaultCopyFile_ReadError tests the error branch when src open fails.
 func TestDefaultCopyFile_ReadError(t *testing.T) {
 	err := defaultCopyFile("/nonexistent/file", "/tmp/dst", 0o644)
