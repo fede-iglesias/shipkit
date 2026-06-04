@@ -140,3 +140,88 @@ func TestMockFsPort_ExtractTarGz_func(t *testing.T) {
 		t.Fatalf("expected sentinel, got %v", err)
 	}
 }
+
+func TestMockFsPort_MkdirAll_DispatchesToFunc(t *testing.T) {
+	var gotPath string
+	var gotPerm fs.FileMode
+	sentinel := errors.New("mkdirall sentinel")
+	m := ports.NewMockFsPort()
+	m.MkdirAllFunc = func(_ context.Context, path string, perm fs.FileMode) error {
+		gotPath = path
+		gotPerm = perm
+		return sentinel
+	}
+	err := m.MkdirAll(context.Background(), "/x", 0o755)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want sentinel, got %v", err)
+	}
+	if gotPath != "/x" {
+		t.Errorf("want path /x, got %q", gotPath)
+	}
+	if gotPerm != 0o755 {
+		t.Errorf("want perm 0755, got %o", gotPerm)
+	}
+}
+
+func TestMockFsPort_ReadFile_DispatchesToFunc(t *testing.T) {
+	want := []byte("hello")
+	m := ports.NewMockFsPort()
+	m.ReadFileFunc = func(_ context.Context, _ string) ([]byte, error) {
+		return want, nil
+	}
+	got, err := m.ReadFile(context.Background(), "/x/file.txt")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+func TestMockFsPort_AtomicWrite_DispatchesToFunc(t *testing.T) {
+	sentinel := errors.New("disk-full")
+	var gotPath string
+	var gotData []byte
+	var gotPerm fs.FileMode
+	m := ports.NewMockFsPort()
+	m.AtomicWriteFunc = func(_ context.Context, path string, data []byte, perm fs.FileMode) error {
+		gotPath = path
+		gotData = data
+		gotPerm = perm
+		return sentinel
+	}
+	err := m.AtomicWrite(context.Background(), "/y/out.txt", []byte("payload"), 0o600)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want sentinel, got %v", err)
+	}
+	if gotPath != "/y/out.txt" {
+		t.Errorf("want path /y/out.txt, got %q", gotPath)
+	}
+	if string(gotData) != "payload" {
+		t.Errorf("want data payload, got %q", gotData)
+	}
+	if gotPerm != 0o600 {
+		t.Errorf("want perm 0600, got %o", gotPerm)
+	}
+}
+
+func TestNewMockFsPort_DefaultFuncs_SafeNoops(t *testing.T) {
+	m := ports.NewMockFsPort()
+	ctx := context.Background()
+
+	if err := m.MkdirAll(ctx, "/x", 0o755); err != nil {
+		t.Errorf("MkdirAll default: unexpected error %v", err)
+	}
+
+	data, err := m.ReadFile(ctx, "/x/file.txt")
+	if err != nil {
+		t.Errorf("ReadFile default: unexpected error %v", err)
+	}
+	if data != nil {
+		t.Errorf("ReadFile default: want nil data, got %v", data)
+	}
+
+	if err := m.AtomicWrite(ctx, "/x/out.txt", []byte("x"), 0o644); err != nil {
+		t.Errorf("AtomicWrite default: unexpected error %v", err)
+	}
+}
