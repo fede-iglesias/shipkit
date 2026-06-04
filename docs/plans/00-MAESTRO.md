@@ -19,6 +19,8 @@ Full consolidated plan lives in engram (NOT inline here):
 | Opus C migration TDD strategy | `shipkit/plan/migration-tdd` | 5150 | kt |
 | 3-Opus angle summary | `shipkit/plan/three-opus-summary` | 5151 | kt |
 | shipkit local discovery | `kt/shipkit-discovery` | 5147 | kt |
+| **In-code docs preference (user override)** | `shipkit/preference/in-code-docs` | 5154 | kt |
+| **In-code docs standards (mandatory spec)** | `shipkit/standards/in-code-docs` | 5155 | kt |
 
 Note: engram project is `kt` because shipkit is not yet registered. All shipkit topic_keys are under the kt project.
 
@@ -111,6 +113,7 @@ Total wall ~7.75h with parallelism (vs ~14h serial).
 - TDD red-green-refactor: test commit precedes implementation commit visibly in git history for NEW packages.
 - Smoke commands: CONTENT assertions, not shape-only. Run the REAL entrypoint (binary), not internal funcs in test scope.
 - Worktree isolation: each sub-Claude works in `/Users/fede/Projects/shipkit-wt-<batch>-<task>/` and `/Users/fede/Projects/kt-wt-<batch>-<task>/`. Merge back on success.
+- **In-code documentation: MANDATORY**. Every exported identifier MUST have godoc, every package needs doc.go + README.md + Example tests, every multi-module package needs CHANGELOG.md. See engram `shipkit/standards/in-code-docs` (obs 5155) for the full spec. Sub-Claudes that fail the godoc gate return `status: failure: missing-docs`. NO merge until docs parity is reached. This OVERRIDES the project default "no comments" rule, per explicit user preference (obs 5154).
 
 ## Per-task template
 
