@@ -3,6 +3,7 @@ package shipkit
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -168,6 +169,32 @@ func TestConfig_WithDefaults_XDGDirsPreserved(t *testing.T) {
 	}
 	if got.SnapshotDir != "/custom/snaps" {
 		t.Errorf("SnapshotDir = %q; want preserved", got.SnapshotDir)
+	}
+}
+
+func TestConfig_WithDefaults_XDGFallbackToHome(t *testing.T) {
+	// CI runners may have XDG_DATA_HOME / XDG_CONFIG_HOME / XDG_CACHE_HOME
+	// pre-set by the system. Force the unset branch to run so the
+	// os.UserHomeDir() fallback path is exercised on every platform.
+	fakeHome := t.TempDir()
+	t.Setenv("HOME", fakeHome)
+	t.Setenv("XDG_DATA_HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("XDG_CACHE_HOME", "")
+
+	cfg := validCfg().WithDefaults()
+
+	wantData := filepath.Join(fakeHome, ".local", "share", "testapp")
+	if cfg.DataRoot != wantData {
+		t.Errorf("DataRoot = %q; want %q", cfg.DataRoot, wantData)
+	}
+	wantConfig := filepath.Join(fakeHome, ".config", "testapp")
+	if cfg.ConfigRoot != wantConfig {
+		t.Errorf("ConfigRoot = %q; want %q", cfg.ConfigRoot, wantConfig)
+	}
+	wantCache := filepath.Join(fakeHome, ".cache", "testapp")
+	if cfg.CacheRoot != wantCache {
+		t.Errorf("CacheRoot = %q; want %q", cfg.CacheRoot, wantCache)
 	}
 }
 
