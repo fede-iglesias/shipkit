@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -273,5 +274,75 @@ func TestDefaultCopyFile_WriteError(t *testing.T) {
 	err := defaultCopyFile(src, "/nonexistent-dir/dst.txt", 0o644)
 	if err == nil {
 		t.Fatal("want error writing to non-existent dir; got nil")
+	}
+}
+
+// TestAtomicWriteCommit_WriteFails covers the write-error branch of atomicWriteCommit.
+// Strategy: create a temp file, close it, then pass it to atomicWriteCommit.
+// Writes to a closed *os.File return an error on all supported platforms.
+func TestAtomicWriteCommit_WriteFails(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.CreateTemp(dir, ".shipkit-atomic-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-close so Write fails.
+	f.Close()
+
+	dest := filepath.Join(dir, "out.txt")
+	got := atomicWriteCommit(f, []byte("x"), 0o644, dest)
+	if got == nil {
+		t.Fatal("want error from atomicWriteCommit with closed file; got nil")
+	}
+	if !strings.Contains(got.Error(), "write") {
+		t.Errorf("want error mentioning 'write', got %q", got.Error())
+	}
+	// Temp file must be cleaned up.
+	if _, statErr := os.Stat(f.Name()); !os.IsNotExist(statErr) {
+		t.Errorf("temp file %q still exists after error cleanup", f.Name())
+	}
+}
+
+// TestAtomicWriteCommit_RenameFails covers the rename-error branch of atomicWriteCommit.
+// Strategy: pre-create a directory at the destination path so os.Rename fails with EISDIR.
+func TestAtomicWriteCommit_RenameFails(t *testing.T) {
+	dir := t.TempDir()
+	f, err := os.CreateTemp(dir, ".shipkit-atomic-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-create a directory at the destination so Rename fails.
+	dest := filepath.Join(dir, "dest-dir")
+	if err := os.Mkdir(dest, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	got := atomicWriteCommit(f, []byte("payload"), 0o644, dest)
+	if got == nil {
+		t.Fatal("want error from atomicWriteCommit with dir-as-dest; got nil")
+	}
+	if !strings.Contains(got.Error(), "rename") {
+		t.Errorf("want error mentioning 'rename', got %q", got.Error())
+	}
+	// Temp file must be cleaned up.
+	if _, statErr := os.Stat(f.Name()); !os.IsNotExist(statErr) {
+		t.Errorf("temp file %q still exists after error cleanup", f.Name())
+	}
+}
+
+// TestRealFsAdapter_AtomicWrite_CommitSeam verifies that replacing atomicWriteCommit
+// redirects through the seam, confirming the seam is actually called.
+func TestRealFsAdapter_AtomicWrite_CommitSeam(t *testing.T) {
+	sentinel := errors.New("injected commit error")
+	orig := atomicWriteCommit
+	atomicWriteCommit = func(_ *os.File, _ []byte, _ fs.FileMode, _ string) error {
+		return sentinel
+	}
+	t.Cleanup(func() { atomicWriteCommit = orig })
+
+	dir := t.TempDir()
+	a := NewRealFs()
+	err := a.AtomicWrite(context.Background(), filepath.Join(dir, "out.txt"), []byte("x"), 0o644)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want sentinel error via seam; got %v", err)
 	}
 }
