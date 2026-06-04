@@ -1,6 +1,13 @@
 package update
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
+
+// ErrTarballEntryEscapes is returned when a tarball entry resolves to a path
+// outside the destination directory or is a disallowed link type (symlink/hardlink).
+var ErrTarballEntryEscapes = errors.New("tarball entry escapes destination directory")
 
 // SnapshotError is returned when snapshotting the current binary or tree fails.
 type SnapshotError struct {
