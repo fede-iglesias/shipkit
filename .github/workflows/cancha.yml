@@ -125,10 +125,13 @@ jobs:
         id: testserver
         run: |
           set -euo pipefail
-          cd internal/testserver
+          # internal/testserver/cmd lives in its own go.mod (split out so the
+          # cmd binary does not drag library coverage down). Build from inside
+          # the cmd module, not from the parent testserver module.
+          cd internal/testserver/cmd
 
           # Build the standalone binary first for a cleaner startup.
-          go build -o /tmp/shipkit-testserver ./cmd
+          go build -o /tmp/shipkit-testserver .
 
           RELEASES_DIR="${{ steps.pack.outputs.releases-dir }}"
           ADDR="127.0.0.1:${TESTSERVER_PORT}"
@@ -234,8 +237,8 @@ jobs:
           echo "$OUT"
 
           # v0.0.2 is the latest in the testserver; assert upgrade happened or
-          # version is reported. Either "0.0.2", "updated", or "already at" is valid.
-          echo "$OUT" | rg -q "0\.0\.2\|updated\|already" \
+          # version is reported. Either "0.0.2", "updated", or "already" is valid.
+          echo "$OUT" | rg -q '0\.0\.2|updated|already' \
             || { echo "ASSERT FAIL: update output missing version or status; got: $OUT"; exit 1; }
 
       - name: Run clean - assert bytes reclaimed
