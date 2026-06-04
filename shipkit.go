@@ -335,6 +335,53 @@ func UninstallCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 	return uninstall.NewCommand(deps, nil), nil
 }
 
+// defaultDoctorStatExecutable is the os-backed default wired into DoctorCmd
+// when the consumer does not override via WithDoctorStatExecutable. Returns
+// (true, nil) when the file at p exists and has any executable bit set.
+var defaultDoctorStatExecutable = func(p string) (bool, error) {
+	info, err := os.Stat(p)
+	if err != nil {
+		return false, err
+	}
+	return info.Mode()&0o111 != 0, nil
+}
+
+// defaultDoctorStatDir is the os-backed default wired into DoctorCmd when
+// the consumer does not override via WithDoctorStatDir. Returns (true, nil)
+// when p exists and is a directory; (false, nil) when p does not exist.
+var defaultDoctorStatDir = func(p string) (bool, error) {
+	info, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return info.IsDir(), nil
+}
+
+// defaultDoctorStatFile is the os-backed default wired into DoctorCmd when
+// the consumer does not override via WithDoctorStatFile. Returns (true, nil)
+// when p exists and is a regular file; (false, nil) when p does not exist.
+var defaultDoctorStatFile = func(p string) (bool, error) {
+	info, err := os.Stat(p)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return !info.IsDir(), nil
+}
+
+// defaultDoctorReadMarker is the os-backed default wired into DoctorCmd when
+// the consumer does not override via WithDoctorReadMarker. Reads the file at p
+// and returns its content as a string.
+var defaultDoctorReadMarker = func(p string) (string, error) {
+	data, err := os.ReadFile(p)
+	return string(data), err
+}
+
 // DoctorCmd returns the doctor subcommand wired with production adapters,
 // unless overridden by opts. The command reports health of binary, XDG dirs,
 // PATH, shell completions, and optionally network connectivity.
@@ -384,43 +431,16 @@ func DoctorCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 	// The guards preserve injected test doubles while removing nil-fallback
 	// "not wired" warnings in production runs.
 	if deps.StatExecutableFunc == nil {
-		deps.StatExecutableFunc = func(p string) (bool, error) {
-			info, err := os.Stat(p)
-			if err != nil {
-				return false, err
-			}
-			return info.Mode()&0o111 != 0, nil
-		}
+		deps.StatExecutableFunc = defaultDoctorStatExecutable
 	}
 	if deps.StatDirFunc == nil {
-		deps.StatDirFunc = func(p string) (bool, error) {
-			info, err := os.Stat(p)
-			if os.IsNotExist(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			return info.IsDir(), nil
-		}
+		deps.StatDirFunc = defaultDoctorStatDir
 	}
 	if deps.StatFileFunc == nil {
-		deps.StatFileFunc = func(p string) (bool, error) {
-			info, err := os.Stat(p)
-			if os.IsNotExist(err) {
-				return false, nil
-			}
-			if err != nil {
-				return false, err
-			}
-			return !info.IsDir(), nil
-		}
+		deps.StatFileFunc = defaultDoctorStatFile
 	}
 	if deps.ReadMarkerFunc == nil {
-		deps.ReadMarkerFunc = func(p string) (string, error) {
-			data, err := os.ReadFile(p)
-			return string(data), err
-		}
+		deps.ReadMarkerFunc = defaultDoctorReadMarker
 	}
 
 	return doctor.NewCommand(deps), nil

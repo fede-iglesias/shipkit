@@ -927,6 +927,172 @@ func TestWithDoctorReadMarker_OverridesDefault(t *testing.T) {
 	}
 }
 
+// ---- Direct tests for package-level default stat funcs ----
+
+// TestDefaultDoctorStatExecutable exercises all three branches of
+// defaultDoctorStatExecutable: executable file, non-executable file, and
+// non-existent path.
+func TestDefaultDoctorStatExecutable(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Success path: file exists and is executable.
+	execPath := filepath.Join(tmp, "exec-bin")
+	if err := os.WriteFile(execPath, []byte("#!/bin/sh"), 0o755); err != nil {
+		t.Fatalf("write exec file: %v", err)
+	}
+	ok, err := defaultDoctorStatExecutable(execPath)
+	if err != nil {
+		t.Errorf("exec file: want nil err; got %v", err)
+	}
+	if !ok {
+		t.Error("exec file: want true; got false")
+	}
+
+	// Non-executable path: file exists but no executable bit.
+	nonExecPath := filepath.Join(tmp, "data.txt")
+	if err := os.WriteFile(nonExecPath, []byte("data"), 0o644); err != nil {
+		t.Fatalf("write non-exec file: %v", err)
+	}
+	ok, err = defaultDoctorStatExecutable(nonExecPath)
+	if err != nil {
+		t.Errorf("non-exec file: want nil err; got %v", err)
+	}
+	if ok {
+		t.Error("non-exec file: want false; got true")
+	}
+
+	// Error path: file does not exist.
+	_, err = defaultDoctorStatExecutable(filepath.Join(tmp, "no-such-file"))
+	if err == nil {
+		t.Error("missing file: want non-nil err; got nil")
+	}
+}
+
+// TestDefaultDoctorStatDir exercises all four branches of defaultDoctorStatDir:
+// existing directory, existing regular file (not a dir), non-existent path
+// (IsNotExist branch), and a non-IsNotExist error via the barrier trick.
+func TestDefaultDoctorStatDir(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Success path: existing directory.
+	ok, err := defaultDoctorStatDir(tmp)
+	if err != nil {
+		t.Errorf("existing dir: want nil err; got %v", err)
+	}
+	if !ok {
+		t.Error("existing dir: want true; got false")
+	}
+
+	// File-not-dir: existing regular file returns (false, nil).
+	filePath := filepath.Join(tmp, "regular.txt")
+	if err := os.WriteFile(filePath, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	ok, err = defaultDoctorStatDir(filePath)
+	if err != nil {
+		t.Errorf("regular file as dir: want nil err; got %v", err)
+	}
+	if ok {
+		t.Error("regular file as dir: want false; got true")
+	}
+
+	// IsNotExist path: non-existent path returns (false, nil) without error.
+	ok, err = defaultDoctorStatDir(filepath.Join(tmp, "does-not-exist"))
+	if err != nil {
+		t.Errorf("not-exist: want nil err; got %v", err)
+	}
+	if ok {
+		t.Error("not-exist: want false; got true")
+	}
+
+	// Other-error path: parent is a regular file so os.Stat returns ENOTDIR.
+	barrier := filepath.Join(tmp, "barrier-dir")
+	if err := os.WriteFile(barrier, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write barrier: %v", err)
+	}
+	_, err = defaultDoctorStatDir(filepath.Join(barrier, "subdir"))
+	if err == nil {
+		t.Error("barrier/subdir: want non-nil err; got nil")
+	}
+}
+
+// TestDefaultDoctorStatFile exercises all four branches of defaultDoctorStatFile:
+// existing regular file, existing directory (not a file), non-existent path
+// (IsNotExist branch), and a non-IsNotExist error via the barrier trick.
+func TestDefaultDoctorStatFile(t *testing.T) {
+	tmp := t.TempDir()
+
+	// Success path: existing regular file.
+	filePath := filepath.Join(tmp, "regular.txt")
+	if err := os.WriteFile(filePath, []byte("content"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	ok, err := defaultDoctorStatFile(filePath)
+	if err != nil {
+		t.Errorf("regular file: want nil err; got %v", err)
+	}
+	if !ok {
+		t.Error("regular file: want true; got false")
+	}
+
+	// Dir-not-file: existing directory returns (false, nil).
+	ok, err = defaultDoctorStatFile(tmp)
+	if err != nil {
+		t.Errorf("directory as file: want nil err; got %v", err)
+	}
+	if ok {
+		t.Error("directory as file: want false; got true")
+	}
+
+	// IsNotExist path: non-existent path returns (false, nil) without error.
+	ok, err = defaultDoctorStatFile(filepath.Join(tmp, "does-not-exist"))
+	if err != nil {
+		t.Errorf("not-exist: want nil err; got %v", err)
+	}
+	if ok {
+		t.Error("not-exist: want false; got true")
+	}
+
+	// Other-error path: parent is a regular file so os.Stat returns ENOTDIR.
+	barrier := filepath.Join(tmp, "barrier-file")
+	if err := os.WriteFile(barrier, []byte("x"), 0o644); err != nil {
+		t.Fatalf("write barrier: %v", err)
+	}
+	_, err = defaultDoctorStatFile(filepath.Join(barrier, "child.txt"))
+	if err == nil {
+		t.Error("barrier/child.txt: want non-nil err; got nil")
+	}
+}
+
+// TestDefaultDoctorReadMarker exercises both branches of defaultDoctorReadMarker:
+// a readable file with known content, and a non-existent path (error path).
+func TestDefaultDoctorReadMarker(t *testing.T) {
+	tmp := t.TempDir()
+	markerPath := filepath.Join(tmp, "install.marker")
+	content := "v0.1.0"
+
+	// Success path: file exists with known content.
+	if err := os.WriteFile(markerPath, []byte(content), 0o644); err != nil {
+		t.Fatalf("write marker: %v", err)
+	}
+	got, err := defaultDoctorReadMarker(markerPath)
+	if err != nil {
+		t.Errorf("readable marker: want nil err; got %v", err)
+	}
+	if got != content {
+		t.Errorf("readable marker: want %q; got %q", content, got)
+	}
+
+	// Error path: non-existent path returns ("", err).
+	got, err = defaultDoctorReadMarker(filepath.Join(tmp, "no-such-marker"))
+	if err == nil {
+		t.Error("missing marker: want non-nil err; got nil")
+	}
+	if got != "" {
+		t.Errorf("missing marker: want empty string; got %q", got)
+	}
+}
+
 // ---- helpers ----
 
 func commandNames(root *cobra.Command) []string {
