@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -662,6 +663,75 @@ func TestNewOrchestrator(t *testing.T) {
 
 // TestOrchestratorImplementsRunner: compile-time check that *Orchestrator satisfies OrchestratorRunner.
 var _ OrchestratorRunner = (*Orchestrator)(nil)
+
+// TestHandlerFor_UnknownStateReturnsNil exercises the default branch of
+// handlerFor: only forward-path states have a handler; anything else returns
+// nil. buildHandlers relies on this being safe to call for the (filtered) set
+// of forward-path transitions only, but the nil return is the contract that
+// surfaces a programmer error when a new forward state is added to
+// Transitions() without a matching handler method.
+func TestHandlerFor_UnknownStateReturnsNil(t *testing.T) {
+	o := NewOrchestrator(defaultConfig())
+	if h := o.handlerFor(StateRollingBack); h != nil {
+		t.Errorf("handlerFor(StateRollingBack) = non-nil, want nil")
+	}
+	if h := o.handlerFor(StateCommitted); h != nil {
+		t.Errorf("handlerFor(StateCommitted) = non-nil, want nil (terminal forward state)")
+	}
+}
+
+// TestRun_MissingHandlerForState exercises the defensive guard in Run's
+// dispatch loop: when a forward-path state has no registered handler the loop
+// returns an explanatory error instead of nil-derefing the map value.
+// The production invariant (handlers always populated by NewOrchestrator) makes
+// this path unreachable in normal use, but the guard is the contract that
+// preserves it.
+func TestRun_MissingHandlerForState(t *testing.T) {
+	o := baseOrchestrator(defaultConfig())
+	// Force handlers init then strip StatePreUpdate so the dispatch loop hits the guard.
+	o.handlers = map[State]stateHandler{
+		StateSnapshotTree:   o.handleSnapshot,
+		StateDownloadBinary: o.handleDownload,
+		StateVerifyCosign:   o.handleVerify,
+		StateAtomicReplace:  o.handleAtomicReplace,
+		StateMigrateTree:    o.handleMigrate,
+		StateHealthCheck:    o.handleHealthCheck,
+	}
+
+	_, err := o.Run(context.Background(), RunOpts{})
+	if err == nil {
+		t.Fatal("want error from missing handler guard, got nil")
+	}
+	if want := "no handler for state pre-upgrade"; !strings.Contains(err.Error(), want) {
+		t.Fatalf("want error containing %q, got %q", want, err.Error())
+	}
+}
+
+// TestOrchestrator_HandlersCoverForwardPath binds the canonical Transitions()
+// table to the orchestrator's registered handlers map. For every transition
+// whose From is a non-terminal forward-path state, the orchestrator MUST have
+// a registered handler for that state. Guarantees the dispatch loop in Run can
+// never hit "no handler for state X" for any reachable forward-path entry.
+func TestOrchestrator_HandlersCoverForwardPath(t *testing.T) {
+	o := NewOrchestrator(defaultConfig())
+
+	// Collect distinct From states on the forward path that need a handler.
+	want := make(map[State]bool)
+	for _, tr := range Transitions() {
+		if IsForwardPath(tr.From) && !IsTerminal(tr.From) {
+			want[tr.From] = true
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("Transitions() produced no forward-path non-terminal states; table or helpers broken")
+	}
+
+	for s := range want {
+		if _, ok := o.handlers[s]; !ok {
+			t.Errorf("orchestrator missing handler for forward-path state %q", s)
+		}
+	}
+}
 
 // TestInit_FactoryRegistered: the init() wires the factory so update.Run delegates.
 func TestInit_FactoryRegistered(t *testing.T) {
