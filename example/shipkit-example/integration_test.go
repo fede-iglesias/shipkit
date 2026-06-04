@@ -211,3 +211,27 @@ func TestHelp(t *testing.T) {
 		}
 	}
 }
+
+// TestVersionFlag asserts the binary responds to --version with a parseable
+// semver on stdout and exit 0. The shipkit update orchestrator's HealthCheck
+// spawns the new binary with --version after AtomicReplace and parses a semver
+// from stdout to confirm the upgrade landed correctly. A consumer that does
+// not honour this contract triggers an unconditional rollback on every update,
+// which is the regression this test guards against.
+func TestVersionFlag(t *testing.T) {
+	binDir := t.TempDir()
+	binPath := filepath.Join(binDir, "shipkit-example")
+	cmd := exec.Command("go", "build", "-ldflags", "-X main.Version=0.0.7", "-o", binPath, "./cmd/shipkit-example")
+	cmd.Env = append(os.Environ(), "GOWORK=off")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build shipkit-example with ldflags: %v\n%s", err, out)
+	}
+
+	out, err := run(binPath, os.Environ(), "--version")
+	if err != nil {
+		t.Fatalf("--version exited non-zero: %v\noutput: %s", err, out)
+	}
+	if !strings.Contains(out, "0.0.7") {
+		t.Errorf("--version output missing injected semver 0.0.7; got: %q", out)
+	}
+}

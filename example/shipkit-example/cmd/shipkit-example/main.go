@@ -27,8 +27,9 @@ var Version = "dev"
 
 func main() {
 	rootCmd := &cobra.Command{
-		Use:   "shipkit-example",
-		Short: "shipkit reference consumer CLI",
+		Use:     "shipkit-example",
+		Version: Version,
+		Short:   "shipkit reference consumer CLI",
 		Long: `shipkit-example is a reference consumer that demonstrates how to wire
 shipkit's five lifecycle verbs (install, update, uninstall, doctor, clean)
 using the production adapters from github.com/fede-iglesias/shipkit/adapters.
