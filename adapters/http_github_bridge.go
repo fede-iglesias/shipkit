@@ -28,6 +28,15 @@ func NewHTTPBridge() *HTTPBridgeAdapter {
 	return &HTTPBridgeAdapter{inner: updateadapters.NewGitHubHTTP()}
 }
 
+// NewHTTPBridgeWithBaseURL returns an HTTPBridgeAdapter whose GitHub API base
+// URL is overridden to baseURL. Use this in tests or cancha workflows to
+// redirect API calls to a local testserver instead of api.github.com.
+func NewHTTPBridgeWithBaseURL(baseURL string) *HTTPBridgeAdapter {
+	inner := updateadapters.NewGitHubHTTP()
+	inner.BaseURL = baseURL
+	return &HTTPBridgeAdapter{inner: inner}
+}
+
 // LatestRelease queries the GitHub Releases API and converts the result to
 // [ports.Release]. Delegates to the underlying GitHubHTTPAdapter.
 func (a *HTTPBridgeAdapter) LatestRelease(ctx context.Context, repo, tagPrefix string) (ports.Release, error) {

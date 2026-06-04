@@ -23,6 +23,23 @@ func TestNewHTTPBridge(t *testing.T) {
 	}
 }
 
+// TestNewHTTPBridgeWithBaseURL verifies that the constructor sets the BaseURL
+// on the inner adapter. Used by the cancha end-to-end workflow to redirect
+// API calls to a local testserver.
+func TestNewHTTPBridgeWithBaseURL(t *testing.T) {
+	const customURL = "http://127.0.0.1:18080"
+	a := NewHTTPBridgeWithBaseURL(customURL)
+	if a == nil {
+		t.Fatal("NewHTTPBridgeWithBaseURL returned nil")
+	}
+	if a.inner == nil {
+		t.Fatal("inner adapter is nil")
+	}
+	if a.inner.BaseURL != customURL {
+		t.Errorf("inner.BaseURL = %q; want %q", a.inner.BaseURL, customURL)
+	}
+}
+
 // TestHTTPBridgeAdapter_LatestRelease_Success verifies that a successful
 // upstream response is converted to a shipkit/ports.Release.
 func TestHTTPBridgeAdapter_LatestRelease_Success(t *testing.T) {

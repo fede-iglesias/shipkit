@@ -89,3 +89,10 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
+
+// replace directives for local development in the shipkit mono-repo.
+// Strip these before creating a release tag for example/shipkit-example.
+replace (
+	github.com/fede-iglesias/shipkit => ../..
+	github.com/fede-iglesias/shipkit/adapters => ../../adapters
+)

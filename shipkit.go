@@ -265,11 +265,23 @@ func InstallCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 // UpdateCmd returns the update subcommand wired with production adapters,
 // unless overridden by opts. The command performs a cosign-verified atomic
 // self-update with rollback.
+//
+// Environment variables (for testing / cancha workflow):
+//
+//	SHIPKIT_RELEASES_BASE   overrides the GitHub API base URL (e.g. http://127.0.0.1:18080)
+//	SHIPKIT_SKIP_VERIFY     set to "1" to skip cosign bundle verification
 func UpdateCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 	cfg = cfg.WithDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+
+	httpAdapter := adapters.NewGitHubHTTP()
+	if base := os.Getenv("SHIPKIT_RELEASES_BASE"); base != "" {
+		httpAdapter.BaseURL = base
+	}
+
+	skipVerify := os.Getenv("SHIPKIT_SKIP_VERIFY") == "1"
 
 	orch := update.NewOrchestrator(update.Config{
 		Repo:               cfg.Repo,
@@ -278,10 +290,11 @@ func UpdateCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 		DataRoot:           cfg.DataRoot,
 		SnapshotDir:        cfg.SnapshotDir,
 		HealthCheckTimeout: cfg.HealthCheckTimeout,
+		SkipVerify:         skipVerify,
 	})
 	// The update orchestrator uses lifecycle/update/ports interfaces which are
 	// nominally distinct from shipkit/ports. Wire the native adapters directly.
-	orch.HTTP = adapters.NewGitHubHTTP()
+	orch.HTTP = httpAdapter
 	orch.FS = adapters.NewRealFs()
 	orch.Cosign = adapters.NewSigstoreCosign()
 	orch.Spawn = adapters.NewRealSpawn()

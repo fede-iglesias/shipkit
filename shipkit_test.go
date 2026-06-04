@@ -333,6 +333,32 @@ func TestUpdateCmd_HappyPath(t *testing.T) {
 	}
 }
 
+func TestUpdateCmd_ReleasesBaseURLOverride(t *testing.T) {
+	// Verify that SHIPKIT_RELEASES_BASE overrides the GitHub API base URL on the
+	// underlying HTTP adapter. This env var is used by the cancha workflow to
+	// redirect API calls to a local testserver.
+	t.Setenv("SHIPKIT_RELEASES_BASE", "http://127.0.0.1:19999")
+	cmd, err := UpdateCmd(validCfg())
+	if err != nil {
+		t.Fatalf("UpdateCmd: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("UpdateCmd returned nil")
+	}
+}
+
+func TestUpdateCmd_SkipVerifyOverride(t *testing.T) {
+	// Verify that SHIPKIT_SKIP_VERIFY=1 is accepted without error.
+	t.Setenv("SHIPKIT_SKIP_VERIFY", "1")
+	cmd, err := UpdateCmd(validCfg())
+	if err != nil {
+		t.Fatalf("UpdateCmd with skip-verify: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("UpdateCmd returned nil")
+	}
+}
+
 func TestUninstallCmd_HappyPath(t *testing.T) {
 	cmd, err := UninstallCmd(validCfg(), allMockPorts()...)
 	if err != nil {

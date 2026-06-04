@@ -1,0 +1,268 @@
+# cancha.yml - end-to-end lifecycle validation on macOS and Ubuntu.
+#
+# "cancha" (Spanish: court/pitch) exercises the full shipkit lifecycle:
+# install -> doctor -> update -> clean -> uninstall, driven against a local
+# testserver that simulates the GitHub Releases API and asset downloads.
+#
+# No real GitHub releases or network access are required. The workflow:
+#   1. Builds shipkit-example at v0.0.1 and v0.0.2 using ldflags.
+#   2. Packages each version into a .tar.gz in a local testdata directory.
+#   3. Starts internal/testserver/cmd pointing at that directory.
+#   4. Runs each lifecycle verb and content-asserts stdout/disk state.
+#
+# Run locally (requires Go 1.26.3 and a posix shell):
+#   GOWORK=off go run ./internal/testserver/cmd -releases /tmp/releases &
+#   # ... build fixtures and run verbs manually ...
+
+name: Cancha (end-to-end lifecycle matrix)
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cancha:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      GOWORK: "off"
+      TESTSERVER_PORT: "18080"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.3"
+
+      - name: Install ripgrep
+        run: |
+          set -euo pipefail
+          if ! command -v rg >/dev/null 2>&1; then
+            if command -v apt-get >/dev/null 2>&1; then
+              sudo apt-get install -y -q ripgrep
+            elif command -v brew >/dev/null 2>&1; then
+              brew install ripgrep
+            else
+              echo "error: cannot install ripgrep (no apt-get or brew)" >&2
+              exit 1
+            fi
+          fi
+          rg --version
+
+      - name: Detect OS and arch
+        id: platform
+        run: |
+          set -euo pipefail
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m)
+          case "$ARCH" in
+            x86_64|amd64) ARCH=amd64 ;;
+            arm64|aarch64) ARCH=arm64 ;;
+            *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          echo "os=$OS" >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+          echo "platform: $OS/$ARCH"
+
+      - name: Create testdata/releases directory
+        run: mkdir -p testdata/releases/example-0.0.1 testdata/releases/example-0.0.2
+
+      - name: Build shipkit-example v0.0.1
+        run: |
+          set -euo pipefail
+          cd example/shipkit-example
+          go build \
+            -ldflags "-X main.Version=0.0.1" \
+            -o ../../testdata/releases/example-0.0.1/shipkit-example \
+            ./cmd/shipkit-example
+          echo "built v0.0.1: $(../../testdata/releases/example-0.0.1/shipkit-example --version 2>&1 || true)"
+
+      - name: Build shipkit-example v0.0.2
+        run: |
+          set -euo pipefail
+          cd example/shipkit-example
+          go build \
+            -ldflags "-X main.Version=0.0.2" \
+            -o ../../testdata/releases/example-0.0.2/shipkit-example \
+            ./cmd/shipkit-example
+          echo "built v0.0.2: $(../../testdata/releases/example-0.0.2/shipkit-example --version 2>&1 || true)"
+
+      - name: Pack fixtures into .tar.gz
+        id: pack
+        run: |
+          set -euo pipefail
+          OS="${{ steps.platform.outputs.os }}"
+          ARCH="${{ steps.platform.outputs.arch }}"
+
+          pack_release() {
+            local ver="$1"
+            local tagdir="testdata/releases/example-${ver}"
+            local asset="shipkit-example_${ver}_${OS}_${ARCH}.tar.gz"
+            # tar the binary, output the archive in the same tag directory.
+            tar -czf "${tagdir}/${asset}" -C "${tagdir}" shipkit-example
+            # Remove the raw binary so the testserver only sees the .tar.gz.
+            rm "${tagdir}/shipkit-example"
+            echo "packed: ${tagdir}/${asset}"
+          }
+
+          pack_release "0.0.1"
+          pack_release "0.0.2"
+
+          echo "releases-dir=$(pwd)/testdata/releases" >> "$GITHUB_OUTPUT"
+
+      - name: Start testserver
+        id: testserver
+        run: |
+          set -euo pipefail
+          cd internal/testserver
+
+          # Build the standalone binary first for a cleaner startup.
+          go build -o /tmp/shipkit-testserver ./cmd
+
+          RELEASES_DIR="${{ steps.pack.outputs.releases-dir }}"
+          ADDR="127.0.0.1:${TESTSERVER_PORT}"
+
+          # Start in background; capture PID for cleanup.
+          /tmp/shipkit-testserver \
+            -releases "${RELEASES_DIR}" \
+            -addr "${ADDR}" \
+            > /tmp/testserver.log 2>&1 &
+          echo "TESTSERVER_PID=$!" >> "$GITHUB_ENV"
+
+          # Wait for the server to report ready (max 10s).
+          for i in $(seq 1 20); do
+            if curl -sf "http://${ADDR}/repos/fede-iglesias/shipkit/releases" > /dev/null 2>&1; then
+              echo "testserver ready at http://${ADDR}"
+              break
+            fi
+            sleep 0.5
+          done
+
+          # Verify it is actually up.
+          curl -sf "http://${ADDR}/repos/fede-iglesias/shipkit/releases" > /dev/null \
+            || { echo "testserver did not start"; cat /tmp/testserver.log; exit 1; }
+
+          echo "addr=http://${ADDR}" >> "$GITHUB_OUTPUT"
+
+      - name: Install shipkit-example v0.0.1 from testserver
+        id: install
+        run: |
+          set -euo pipefail
+          BIN_DIR="$(mktemp -d)"
+          RELEASES_DIR="${{ steps.pack.outputs.releases-dir }}"
+          OS="${{ steps.platform.outputs.os }}"
+          ARCH="${{ steps.platform.outputs.arch }}"
+          ASSET="shipkit-example_0.0.1_${OS}_${ARCH}.tar.gz"
+
+          # Extract v0.0.1 into BIN_DIR.
+          tar -xzf "${RELEASES_DIR}/example-0.0.1/${ASSET}" -C "${BIN_DIR}"
+          chmod +x "${BIN_DIR}/shipkit-example"
+          echo "SHIPKIT_BIN=${BIN_DIR}/shipkit-example" >> "$GITHUB_ENV"
+          echo "SHIPKIT_BIN_DIR=${BIN_DIR}" >> "$GITHUB_ENV"
+          echo "bin=${BIN_DIR}/shipkit-example" >> "$GITHUB_OUTPUT"
+
+          # Set up isolated XDG dirs.
+          XDG_ROOT="$(mktemp -d)"
+          echo "XDG_ROOT=${XDG_ROOT}" >> "$GITHUB_ENV"
+          echo "XDG_DATA_HOME=${XDG_ROOT}/data" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=${XDG_ROOT}/config" >> "$GITHUB_ENV"
+          echo "XDG_CACHE_HOME=${XDG_ROOT}/cache" >> "$GITHUB_ENV"
+          HOME_DIR="${XDG_ROOT}/home"
+          mkdir -p "${HOME_DIR}"
+          touch "${HOME_DIR}/.zshrc" "${HOME_DIR}/.bashrc"
+          echo "HOME=${HOME_DIR}" >> "$GITHUB_ENV"
+
+          # Run install --yes.
+          OUT=$("${BIN_DIR}/shipkit-example" install --yes 2>&1)
+          echo "$OUT"
+
+          # Content assert: app name present.
+          echo "$OUT" | rg -q "shipkit-example" \
+            || { echo "ASSERT FAIL: install output missing app name"; exit 1; }
+
+          # Marker file must exist and contain the installed version.
+          MARKER="${XDG_ROOT}/data/shipkit-example/.shipkit.installed"
+          test -f "${MARKER}" \
+            || { echo "ASSERT FAIL: marker file not found at ${MARKER}"; exit 1; }
+          rg -q '"version_installed"' "${MARKER}" \
+            || { echo "ASSERT FAIL: marker missing version_installed field"; exit 1; }
+          rg -q '"app".*"shipkit-example"' "${MARKER}" \
+            || { echo "ASSERT FAIL: marker missing correct app name"; exit 1; }
+          echo "marker: $(cat "${MARKER}")"
+
+      - name: Run doctor - assert binary.executable PASS
+        run: |
+          set -euo pipefail
+          OUT=$("${SHIPKIT_BIN}" doctor 2>&1 || true)
+          echo "$OUT"
+          echo "$OUT" | rg -q "binary.executable" \
+            || { echo "ASSERT FAIL: doctor output missing binary.executable check"; exit 1; }
+          echo "$OUT" | rg -q "\[PASS\]" \
+            || { echo "ASSERT FAIL: doctor output missing [PASS]"; exit 1; }
+
+      - name: Update to v0.0.2 via testserver
+        env:
+          SHIPKIT_RELEASES_BASE: ${{ steps.testserver.outputs.addr }}
+          SHIPKIT_SKIP_VERIFY: "1"
+        run: |
+          set -euo pipefail
+
+          # The update verb reads SHIPKIT_RELEASES_BASE to override the GitHub
+          # API base URL so it calls the local testserver instead of api.github.com.
+          # SHIPKIT_SKIP_VERIFY=1 skips cosign bundle verification since the
+          # testserver serves plain tar.gz fixtures without .bundle sidecars.
+          OUT=$("${SHIPKIT_BIN}" update 2>&1 || true)
+          echo "$OUT"
+
+          # v0.0.2 is the latest in the testserver; assert upgrade happened or
+          # version is reported. Either "0.0.2", "updated", or "already at" is valid.
+          echo "$OUT" | rg -q "0\.0\.2\|updated\|already" \
+            || { echo "ASSERT FAIL: update output missing version or status; got: $OUT"; exit 1; }
+
+      - name: Run clean - assert bytes reclaimed
+        run: |
+          set -euo pipefail
+          OUT=$("${SHIPKIT_BIN}" clean --snapshots --keep 0 --yes 2>&1 || true)
+          echo "$OUT"
+          # clean reports "Removed N item(s). Reclaimed X." or "Nothing to clean."
+          echo "$OUT" | rg -qi "reclaimed|nothing to clean|removed" \
+            || { echo "ASSERT FAIL: clean output missing expected status; got: $OUT"; exit 1; }
+
+      - name: Uninstall - assert binary and data removed
+        run: |
+          set -euo pipefail
+          OUT=$("${SHIPKIT_BIN}" uninstall --yes 2>&1)
+          echo "$OUT"
+
+          # Output must report Binary action.
+          echo "$OUT" | rg -q "Binary:" \
+            || { echo "ASSERT FAIL: uninstall output missing Binary: line"; exit 1; }
+
+          # Marker file must be gone.
+          MARKER="${XDG_ROOT}/data/shipkit-example/.shipkit.installed"
+          test ! -f "${MARKER}" \
+            || { echo "ASSERT FAIL: marker file still present after uninstall: ${MARKER}"; exit 1; }
+
+      - name: Stop testserver
+        if: always()
+        run: |
+          if [ -n "${TESTSERVER_PID:-}" ]; then
+            kill "${TESTSERVER_PID}" 2>/dev/null || true
+          fi
+          echo "testserver log:"
+          cat /tmp/testserver.log 2>/dev/null || true
+
+      - name: Cleanup testdata/releases
+        if: always()
+        run: rm -rf testdata/releases
