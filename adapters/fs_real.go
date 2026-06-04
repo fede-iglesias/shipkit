@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	updateadapters "github.com/fede-iglesias/shipkit/lifecycle/update/adapters"
 )
@@ -85,4 +86,48 @@ func (a *RealFsAdapter) RemoveDir(ctx context.Context, dir string) error {
 	default:
 	}
 	return a.RemoveAllFn(dir)
+}
+
+// MkdirAll implements ports.FsPort. It is equivalent to os.MkdirAll.
+// The ctx is reserved for future cancellation but unused for short-lived FS calls.
+func (a *RealFsAdapter) MkdirAll(ctx context.Context, path string, perm fs.FileMode) error {
+	return os.MkdirAll(path, perm)
+}
+
+// ReadFile implements ports.FsPort. It is equivalent to os.ReadFile.
+func (a *RealFsAdapter) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return os.ReadFile(path)
+}
+
+// AtomicWrite implements ports.FsPort. It writes data to path using a
+// temp-then-rename pattern: creates a temp file in the same directory,
+// writes data, chmods to perm, closes, then renames to path atomically.
+// Returns an error if the parent directory does not exist.
+func (a *RealFsAdapter) AtomicWrite(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".shipkit-atomic-*")
+	if err != nil {
+		return fmt.Errorf("atomic write: create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("atomic write: write: %w", err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		tmp.Close()
+		cleanup()
+		return fmt.Errorf("atomic write: chmod: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write: close: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		cleanup()
+		return fmt.Errorf("atomic write: rename: %w", err)
+	}
+	return nil
 }

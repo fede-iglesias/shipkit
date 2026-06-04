@@ -49,6 +49,18 @@ type FsPort interface {
 	// equivalent to os.RemoveAll. Returning nil if dir does not exist is
 	// acceptable (idempotent).
 	RemoveDir(ctx context.Context, dir string) error
+
+	// MkdirAll is the ports equivalent of os.MkdirAll. The ctx is reserved for
+	// future cancellation; implementations may ignore it for short-lived FS calls.
+	MkdirAll(ctx context.Context, path string, perm fs.FileMode) error
+
+	// ReadFile is the ports equivalent of os.ReadFile.
+	ReadFile(ctx context.Context, path string) ([]byte, error)
+
+	// AtomicWrite writes data to path using a temp-then-rename pattern. perm is
+	// applied to the destination file via Chmod before rename. Returns error if
+	// the parent directory does not exist.
+	AtomicWrite(ctx context.Context, path string, data []byte, perm fs.FileMode) error
 }
 
 // MockFsPort is a test double for FsPort. It records calls and returns the
@@ -60,17 +72,29 @@ type MockFsPort struct {
 	ExtractTarGzFunc  func(ctx context.Context, archive, destDir string) error
 	CopyFileFunc      func(ctx context.Context, src, dst string, mode fs.FileMode) error
 	RemoveDirFunc     func(ctx context.Context, dir string) error
+	MkdirAllFunc      func(ctx context.Context, path string, perm fs.FileMode) error
+	ReadFileFunc      func(ctx context.Context, path string) ([]byte, error)
+	AtomicWriteFunc   func(ctx context.Context, path string, data []byte, perm fs.FileMode) error
 
 	SnapshotCalls      [][2]string
 	RestoreCalls       [][2]string
 	AtomicReplaceCalls [][2]string
 	ExtractTarGzCalls  [][2]string
-	CopyFileCalls      []struct{ Src, Dst string; Mode fs.FileMode }
-	RemoveDirCalls     []string
+	CopyFileCalls      []struct {
+		Src, Dst string
+		Mode     fs.FileMode
+	}
+	RemoveDirCalls []string
 }
 
 // NewMockFsPort returns a MockFsPort with safe zero-value defaults.
-func NewMockFsPort() *MockFsPort { return &MockFsPort{} }
+func NewMockFsPort() *MockFsPort {
+	return &MockFsPort{
+		MkdirAllFunc:    func(_ context.Context, _ string, _ fs.FileMode) error { return nil },
+		ReadFileFunc:    func(_ context.Context, _ string) ([]byte, error) { return nil, nil },
+		AtomicWriteFunc: func(_ context.Context, _ string, _ []byte, _ fs.FileMode) error { return nil },
+	}
+}
 
 // Snapshot implements FsPort.
 func (m *MockFsPort) Snapshot(ctx context.Context, src, snapshotDir string) (string, error) {
@@ -127,4 +151,19 @@ func (m *MockFsPort) RemoveDir(ctx context.Context, dir string) error {
 		return m.RemoveDirFunc(ctx, dir)
 	}
 	return nil
+}
+
+// MkdirAll implements FsPort.
+func (m *MockFsPort) MkdirAll(ctx context.Context, path string, perm fs.FileMode) error {
+	return m.MkdirAllFunc(ctx, path, perm)
+}
+
+// ReadFile implements FsPort.
+func (m *MockFsPort) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return m.ReadFileFunc(ctx, path)
+}
+
+// AtomicWrite implements FsPort.
+func (m *MockFsPort) AtomicWrite(ctx context.Context, path string, data []byte, perm fs.FileMode) error {
+	return m.AtomicWriteFunc(ctx, path, data, perm)
 }
