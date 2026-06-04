@@ -10,7 +10,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+
+	"github.com/fede-iglesias/shipkit/lifecycle/update"
 )
 
 // RealFsAdapter implements ports.FsPort using os primitives + tar/gzip stdlib.
@@ -200,6 +203,14 @@ func (a *RealFsAdapter) ExtractTarGz(ctx context.Context, archive, destDir strin
 		}
 
 		target := filepath.Join(destDir, filepath.Clean(hdr.Name))
+
+		rel, err := filepath.Rel(destDir, target)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("extract: %w: entry %q resolves outside destDir", update.ErrTarballEntryEscapes, hdr.Name)
+		}
+		if hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeLink {
+			return fmt.Errorf("extract: %w: symlink and hardlink entries not permitted: %q", update.ErrTarballEntryEscapes, hdr.Name)
+		}
 
 		switch hdr.Typeflag {
 		case tar.TypeDir:
