@@ -275,6 +275,7 @@ func UpdateCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	o := applyOptions(opts)
 
 	httpAdapter := adapters.NewGitHubHTTP()
 	if base := os.Getenv("SHIPKIT_RELEASES_BASE"); base != "" {
@@ -299,6 +300,13 @@ func UpdateCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 	orch.Cosign = adapters.NewSigstoreCosign()
 	orch.Spawn = adapters.NewRealSpawn()
 	orch.Clock = adapters.NewRealClock()
+
+	// Register any consumer-supplied migrations on the orchestrator before
+	// returning the command. Migrations are applied (in semver ascending order)
+	// by the orchestrator's ApplyPending step during an update run.
+	for _, m := range o.migrations {
+		orch.Migrator.Register(m)
+	}
 
 	return newUpdateCommand(cfg, orch), nil
 }
@@ -356,6 +364,65 @@ func DoctorCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 		Clock:          coalesce[ports.ClockPort](o.clock, adapters.NewRealClock()),
 		Completion:     coalesce[ports.CompletionPort](o.completion, adapters.NewCompletionCobra()),
 	}
+
+	// Apply consumer overrides first so the nil-default guards below do not
+	// clobber them.
+	if o.doctorStatExecutable != nil {
+		deps.StatExecutableFunc = o.doctorStatExecutable
+	}
+	if o.doctorStatDir != nil {
+		deps.StatDirFunc = o.doctorStatDir
+	}
+	if o.doctorStatFile != nil {
+		deps.StatFileFunc = o.doctorStatFile
+	}
+	if o.doctorReadMarker != nil {
+		deps.ReadMarkerFunc = o.doctorReadMarker
+	}
+
+	// Wire os-backed defaults for any stat funcs not overridden by the consumer.
+	// The guards preserve injected test doubles while removing nil-fallback
+	// "not wired" warnings in production runs.
+	if deps.StatExecutableFunc == nil {
+		deps.StatExecutableFunc = func(p string) (bool, error) {
+			info, err := os.Stat(p)
+			if err != nil {
+				return false, err
+			}
+			return info.Mode()&0o111 != 0, nil
+		}
+	}
+	if deps.StatDirFunc == nil {
+		deps.StatDirFunc = func(p string) (bool, error) {
+			info, err := os.Stat(p)
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return info.IsDir(), nil
+		}
+	}
+	if deps.StatFileFunc == nil {
+		deps.StatFileFunc = func(p string) (bool, error) {
+			info, err := os.Stat(p)
+			if os.IsNotExist(err) {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			return !info.IsDir(), nil
+		}
+	}
+	if deps.ReadMarkerFunc == nil {
+		deps.ReadMarkerFunc = func(p string) (string, error) {
+			data, err := os.ReadFile(p)
+			return string(data), err
+		}
+	}
+
 	return doctor.NewCommand(deps), nil
 }
 

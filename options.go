@@ -1,6 +1,7 @@
 package shipkit
 
 import (
+	"github.com/fede-iglesias/shipkit/lifecycle/migrations"
 	"github.com/fede-iglesias/shipkit/ports"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +37,19 @@ type optionState struct {
 	completion ports.CompletionPort
 	autostart  ports.AutostartPort
 	prompt     ports.PromptPort
+
+	// migrations holds any [migrations.Migration] values supplied via
+	// [WithMigrations]. UpdateCmd registers these on the orchestrator's
+	// Migrator before returning the cobra command.
+	migrations []migrations.Migration
+
+	// Doctor stat func overrides. nil means use the os-backed defaults wired
+	// by DoctorCmd. Set via WithDoctorStatExecutable, WithDoctorStatDir,
+	// WithDoctorStatFile, WithDoctorReadMarker.
+	doctorStatExecutable func(string) (bool, error)
+	doctorStatDir        func(string) (bool, error)
+	doctorStatFile       func(string) (bool, error)
+	doctorReadMarker     func(string) (string, error)
 
 	// Verb builder overrides. nil means use the real implementation.
 	// These are package-internal and used only in tests to simulate errors.
@@ -147,6 +161,44 @@ func WithAutostartPort(p ports.AutostartPort) Option {
 // clean.
 func WithPromptPort(p ports.PromptPort) Option {
 	return func(o *optionState) { o.prompt = p }
+}
+
+// WithMigrations registers one or more [migrations.Migration] values with the
+// update orchestrator. Migrations are applied (in semver ascending order) by
+// the orchestrator during an update run.
+//
+// Calling WithMigrations multiple times accumulates migrations; they are all
+// registered before the cobra command is returned.
+func WithMigrations(migs ...migrations.Migration) Option {
+	return func(o *optionState) { o.migrations = append(o.migrations, migs...) }
+}
+
+// WithDoctorStatExecutable injects a custom StatExecutableFunc into DoctorCmd,
+// replacing the default os.Stat-backed implementation. Use in tests to control
+// executable-bit check behaviour.
+func WithDoctorStatExecutable(fn func(string) (bool, error)) Option {
+	return func(o *optionState) { o.doctorStatExecutable = fn }
+}
+
+// WithDoctorStatDir injects a custom StatDirFunc into DoctorCmd, replacing the
+// default os.Stat-backed implementation. Use in tests to control directory
+// existence check behaviour.
+func WithDoctorStatDir(fn func(string) (bool, error)) Option {
+	return func(o *optionState) { o.doctorStatDir = fn }
+}
+
+// WithDoctorStatFile injects a custom StatFileFunc into DoctorCmd, replacing
+// the default os.Stat-backed implementation. Use in tests to control file
+// existence check behaviour.
+func WithDoctorStatFile(fn func(string) (bool, error)) Option {
+	return func(o *optionState) { o.doctorStatFile = fn }
+}
+
+// WithDoctorReadMarker injects a custom ReadMarkerFunc into DoctorCmd,
+// replacing the default os.ReadFile-backed implementation. Use in tests to
+// control install-marker read behaviour.
+func WithDoctorReadMarker(fn func(string) (string, error)) Option {
+	return func(o *optionState) { o.doctorReadMarker = fn }
 }
 
 // withInstallCmdFn replaces the install verb builder. Package-internal; used

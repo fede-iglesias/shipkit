@@ -1,8 +1,10 @@
 package shipkit
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -616,6 +618,126 @@ func assertUpdateRunSucceeds(t *testing.T, cmd *cobra.Command) {
 	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("cmd.Execute: %v", err)
+	}
+}
+
+// ---- W4: WithMigrations ----
+
+// stubMigration is a minimal migrations.Migration implementation for tests.
+type stubMigration struct {
+	version string
+}
+
+func (m *stubMigration) Version() string                         { return m.version }
+func (m *stubMigration) Description() string                     { return "stub migration " + m.version }
+func (m *stubMigration) Apply(_ context.Context, _ string) error { return nil }
+func (m *stubMigration) Revert(_ context.Context, _ string) error { return nil }
+
+// TestWithMigrations_StoresInOptionState verifies that WithMigrations stores
+// the supplied migrations in optionState.migrations, which UpdateCmd then
+// registers on the orchestrator.
+func TestWithMigrations_StoresInOptionState(t *testing.T) {
+	m1 := &stubMigration{version: "0.2.0"}
+	m2 := &stubMigration{version: "0.3.0"}
+
+	o := applyOptions([]Option{WithMigrations(m1, m2)})
+
+	if len(o.migrations) != 2 {
+		t.Fatalf("expected 2 migrations in optionState; got %d", len(o.migrations))
+	}
+	if o.migrations[0].Version() != "0.2.0" {
+		t.Errorf("migrations[0].Version = %q; want %q", o.migrations[0].Version(), "0.2.0")
+	}
+	if o.migrations[1].Version() != "0.3.0" {
+		t.Errorf("migrations[1].Version = %q; want %q", o.migrations[1].Version(), "0.3.0")
+	}
+}
+
+// TestWithMigrations_UpdateCmdAccepts verifies that UpdateCmd accepts
+// WithMigrations without error, i.e. the option is wired correctly.
+func TestWithMigrations_UpdateCmdAccepts(t *testing.T) {
+	m := &stubMigration{version: "0.2.0"}
+	cmd, err := UpdateCmd(validCfg(), WithMigrations(m))
+	if err != nil {
+		t.Fatalf("UpdateCmd with WithMigrations: %v", err)
+	}
+	if cmd == nil {
+		t.Fatal("UpdateCmd returned nil command")
+	}
+}
+
+// ---- W5: DoctorCmd default stat funcs ----
+
+// TestDoctorCmd_WiresDefaultStatFuncs verifies that DoctorCmd wires os-backed
+// defaults for StatExecutableFunc, StatDirFunc, StatFileFunc, and
+// ReadMarkerFunc so that doctor runs without "not wired" warnings.
+func TestDoctorCmd_WiresDefaultStatFuncs(t *testing.T) {
+	// Create a temp directory tree that satisfies the doctor checks.
+	tmp := t.TempDir()
+	binPath := filepath.Join(tmp, "testapp")
+
+	// Write a minimal "binary" that reports the version.
+	script := "#!/bin/sh\necho v0.1.0\n"
+	if err := os.WriteFile(binPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	dataRoot := filepath.Join(tmp, "data")
+	configRoot := filepath.Join(tmp, "config")
+	cacheRoot := filepath.Join(tmp, "cache")
+	for _, d := range []string{dataRoot, configRoot, cacheRoot} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	cfg := Config{
+		AppName:    "testapp",
+		BinaryName: "testapp",
+		Version:    "v0.1.0",
+		Repo:       "owner/tools",
+		TagPrefix:  "testapp-",
+		BinaryPath: binPath,
+		DataRoot:   dataRoot,
+		ConfigRoot: configRoot,
+		CacheRoot:  cacheRoot,
+	}
+
+	cmd, err := DoctorCmd(cfg, allMockPorts()...)
+	if err != nil {
+		t.Fatalf("DoctorCmd: %v", err)
+	}
+
+	// Capture output and run doctor.
+	var buf bytes.Buffer
+	cmd.SetOut(&buf)
+	cmd.SetErr(&buf)
+	cmd.SetArgs([]string{})
+	// doctor may exit non-zero if some checks fail; we only care about "not wired".
+	_ = cmd.Execute()
+
+	out := buf.String()
+	if bytes.Contains([]byte(out), []byte("not wired")) {
+		t.Errorf("DoctorCmd output contains 'not wired' warnings; stat funcs were not wired:\n%s", out)
+	}
+}
+
+// TestWithDoctorStatExecutable_OverridesDefault verifies that
+// WithDoctorStatExecutable replaces the default wired function.
+func TestWithDoctorStatExecutable_OverridesDefault(t *testing.T) {
+	var called bool
+	override := func(p string) (bool, error) {
+		called = true
+		return true, nil
+	}
+	o := applyOptions([]Option{WithDoctorStatExecutable(override)})
+	if o.doctorStatExecutable == nil {
+		t.Fatal("WithDoctorStatExecutable: doctorStatExecutable is nil in optionState")
+	}
+	// invoke to confirm it's the override, not the default
+	_, _ = o.doctorStatExecutable("/any")
+	if !called {
+		t.Error("override function was not stored correctly")
 	}
 }
 
