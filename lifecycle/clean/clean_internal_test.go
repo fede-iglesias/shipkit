@@ -3,6 +3,7 @@ package clean
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -474,6 +475,138 @@ func TestRun_PromptError(t *testing.T) {
 	_, err := Run(context.Background(), deps, opts)
 	if err == nil {
 		t.Fatal("expected error when Prompt fails, got nil")
+	}
+}
+
+// TestDefaultListSnapshots_LstatRace verifies that when osLstat fails for an
+// entry (file disappeared between ReadDir and Lstat), the entry is silently
+// skipped and no error is returned.
+func TestDefaultListSnapshots_LstatRace(t *testing.T) {
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a real entry so ReadDir returns something.
+	if err := os.Mkdir(filepath.Join(snapDir, "snap-race"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := osLstat
+	defer func() { osLstat = orig }()
+	osLstat = func(name string) (os.FileInfo, error) {
+		return nil, errors.New("simulated race: file disappeared")
+	}
+
+	entries, err := DefaultListSnapshots(snapDir)
+	if err != nil {
+		t.Fatalf("expected nil error on lstat race, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries when lstat fails, got %d", len(entries))
+	}
+}
+
+// TestDefaultListSnapshots_StatRace verifies that when osStat fails for an
+// entry (e.g. symlink target removed between Lstat and Stat), the entry is
+// skipped and no error is returned.
+func TestDefaultListSnapshots_StatRace(t *testing.T) {
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(snapDir, "snap-stat-race"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// osLstat must return a valid non-symlink FileInfo so the code reaches osStat.
+	origLstat := osLstat
+	defer func() { osLstat = origLstat }()
+	osLstat = func(name string) (os.FileInfo, error) {
+		// Delegate to the real Lstat so we get a real FileInfo (not a symlink).
+		return os.Lstat(name)
+	}
+
+	origStat := osStat
+	defer func() { osStat = origStat }()
+	osStat = func(name string) (os.FileInfo, error) {
+		return nil, errors.New("simulated race: stat failed")
+	}
+
+	entries, err := DefaultListSnapshots(snapDir)
+	if err != nil {
+		t.Fatalf("expected nil error on stat race, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries when stat fails, got %d", len(entries))
+	}
+}
+
+// TestDefaultListSnapshots_ReadlinkBranch covers both arms of the readlink
+// branch: the happy path (readErr == nil, SymlinkDest populated) is covered by
+// TestDefaultListSnapshots_Symlink; this test covers the readErr != nil arm
+// by injecting a failing osReadlink while osLstat reports a symlink.
+func TestDefaultListSnapshots_ReadlinkBranch(t *testing.T) {
+	dir := t.TempDir()
+	snapDir := filepath.Join(dir, "snapshots")
+	if err := os.MkdirAll(snapDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "target")
+	if err := os.Mkdir(target, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(snapDir, "snap-link")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skip("symlinks not supported on this platform")
+	}
+
+	origReadlink := osReadlink
+	defer func() { osReadlink = origReadlink }()
+	osReadlink = func(name string) (string, error) {
+		return "", errors.New("simulated readlink error")
+	}
+
+	entries, err := DefaultListSnapshots(snapDir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The symlink is still included (Stat follows it fine); SymlinkDest is just empty.
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0].SymlinkDest != "" {
+		t.Errorf("expected empty SymlinkDest when readlink fails, got %q", entries[0].SymlinkDest)
+	}
+}
+
+// TestDefaultListLogs_InfoRace verifies that when osLstat fails for a log file
+// entry (file disappeared between ReadDir and Lstat), the entry is silently
+// skipped and no error is returned.
+func TestDefaultListLogs_InfoRace(t *testing.T) {
+	dir := t.TempDir()
+	logsDir := filepath.Join(dir, "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Create a regular file so ReadDir returns a non-directory entry.
+	if err := os.WriteFile(filepath.Join(logsDir, "run.log"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	orig := osLstat
+	defer func() { osLstat = orig }()
+	osLstat = func(name string) (os.FileInfo, error) {
+		return nil, errors.New("simulated race: log file disappeared")
+	}
+
+	entries, err := DefaultListLogs(logsDir)
+	if err != nil {
+		t.Fatalf("expected nil error on lstat race in logs, got %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("expected 0 entries when lstat fails, got %d", len(entries))
 	}
 }
 

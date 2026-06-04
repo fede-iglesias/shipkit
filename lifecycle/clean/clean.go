@@ -19,6 +19,15 @@ import (
 // print + exit 1, preventing accidental mass deletion.
 var ErrNoScope = errors.New("clean: at least one scope flag (--snapshots, --tmp, --cache, --logs, --all) is required")
 
+// Testing seams. The default values point at the real syscalls; tests replace
+// them via the *_internal_test.go file to simulate file-disappearance races
+// between ReadDir and the subsequent metadata calls.
+var (
+	osLstat    = os.Lstat
+	osStat     = os.Stat
+	osReadlink = os.Readlink
+)
+
 // Options controls what clean targets and how it behaves.
 type Options struct {
 	// Snapshots enables cleaning of snapshot directories under DataDir/snapshots/.
@@ -404,19 +413,19 @@ func DefaultListSnapshots(snapshotDir string) ([]SnapshotEntry, error) {
 		p := filepath.Join(snapshotDir, info.Name())
 		// Use Lstat to detect symlinks without following them, then Stat for the
 		// full metadata (ModTime, Mode) of the actual target.
-		lfi, lstatErr := os.Lstat(p)
+		lfi, lstatErr := osLstat(p)
 		if lstatErr != nil {
 			continue
 		}
 		symlinkDest := ""
 		if lfi.Mode()&os.ModeSymlink != 0 {
-			dest, readErr := os.Readlink(p)
+			dest, readErr := osReadlink(p)
 			if readErr == nil {
 				symlinkDest, _ = filepath.Abs(dest)
 			}
 		}
 		// Use Stat (follows symlink) to get ModTime from the target.
-		fi, statErr := os.Stat(p)
+		fi, statErr := osStat(p)
 		if statErr != nil {
 			continue
 		}
@@ -483,11 +492,11 @@ func DefaultListLogs(logsDir string) ([]LogEntry, error) {
 			continue
 		}
 		p := filepath.Join(logsDir, info.Name())
-		// Use the DirEntry file info directly to avoid an extra Stat syscall.
-		// Info() returns the same data as Stat for regular files opened via ReadDir.
-		fi, err := info.Info()
+		// Use osLstat to obtain the file size. This shares the osLstat seam with
+		// DefaultListSnapshots, making the race-condition skip branch testable.
+		fi, err := osLstat(p)
 		if err != nil {
-			// File disappeared between ReadDir and Info (rare race condition).
+			// File disappeared between ReadDir and Lstat (rare race condition).
 			continue
 		}
 		entries = append(entries, LogEntry{Path: p, Size: fi.Size()})
