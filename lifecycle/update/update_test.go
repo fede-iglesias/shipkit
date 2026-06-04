@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 )
 
 // --- helpers ---
@@ -222,7 +224,7 @@ func TestKind_Constants(t *testing.T) {
 // --- TestResult_Fields ---
 
 func TestResult_Fields(t *testing.T) {
-	m := &RecoveryManifest{Cause: "disk full"}
+	m := &recovery.Manifest{Cause: "disk full"}
 	r := Result{
 		Kind:     KindFailedUnrecoverable,
 		From:     "v0.0.10",

@@ -5,11 +5,13 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fede-iglesias/shipkit/lifecycle/migrations"
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/lifecycle/update/ports"
 )
 
@@ -995,5 +997,195 @@ func TestRun_OpenFileFails(t *testing.T) {
 	}
 	if res.Kind != KindRolledBack {
 		t.Fatalf("want KindRolledBack on openFile failure, got %s", res.Kind)
+	}
+}
+
+// TestOrchestrator_RollbackWritesRecoveryManifest asserts that the orchestrator
+// persists the canonical recovery manifest on the rolled-back terminal path
+// so that lifecycle/clean and lifecycle/doctor can read it from disk. This is
+// the end-to-end fix for C1: pre-W1.4b the manifest was only built in memory.
+func TestOrchestrator_RollbackWritesRecoveryManifest(t *testing.T) {
+	dataRoot := t.TempDir()
+	cfg := defaultConfig()
+	cfg.DataRoot = dataRoot
+	cfg.BinaryPath = filepath.Join(t.TempDir(), "myapp")
+
+	o := baseOrchestrator(cfg)
+	o.FS = &mockFsPort{
+		snapshotFn: func(_ context.Context, _, _ string) (string, error) {
+			return "snap-rolledback", nil
+		},
+		// Restore succeeds, so the rollback path reaches KindRolledBack.
+	}
+	// Force health check failure to trigger rollback at StateHealthCheck.
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: false, Reason: "binary crashed"}, nil
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	if res.Kind != KindRolledBack {
+		t.Fatalf("want KindRolledBack, got %s", res.Kind)
+	}
+
+	// Canonical manifest must exist on disk under DataRoot.
+	manifestPath := recovery.Path(dataRoot)
+	if _, statErr := os.Stat(manifestPath); statErr != nil {
+		t.Fatalf("want recovery manifest at %q after rollback, stat: %v", manifestPath, statErr)
+	}
+
+	m, readErr := recovery.Read(manifestPath)
+	if readErr != nil {
+		t.Fatalf("recovery.Read(%q) error: %v", manifestPath, readErr)
+	}
+	if m.Version != 1 {
+		t.Errorf("Manifest.Version = %d, want 1", m.Version)
+	}
+	if m.AppName != "myapp" {
+		t.Errorf("Manifest.AppName = %q, want %q", m.AppName, "myapp")
+	}
+	if m.SnapshotPath != "snap-rolledback" {
+		t.Errorf("Manifest.SnapshotPath = %q, want %q", m.SnapshotPath, "snap-rolledback")
+	}
+	if m.Cause == "" {
+		t.Error("Manifest.Cause is empty, want the rollback cause")
+	}
+	if m.CreatedAt.IsZero() {
+		t.Error("Manifest.CreatedAt is zero, want a non-zero timestamp")
+	}
+}
+
+// TestOrchestrator_UnrecoverableWritesRecoveryManifest asserts that when the
+// rollback itself fails (restore returns an error), the orchestrator still
+// writes the canonical manifest to disk so the operator can recover manually.
+func TestOrchestrator_UnrecoverableWritesRecoveryManifest(t *testing.T) {
+	dataRoot := t.TempDir()
+	cfg := defaultConfig()
+	cfg.DataRoot = dataRoot
+	cfg.BinaryPath = filepath.Join(t.TempDir(), "myapp")
+
+	o := baseOrchestrator(cfg)
+	// Force health check failure to enter rollback.
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: false, Reason: "binary crashed"}, nil
+		},
+	}
+	// Restore fails => unrecoverable.
+	o.FS = &mockFsPort{
+		snapshotFn: func(_ context.Context, _, _ string) (string, error) {
+			return "snap-unrecoverable", nil
+		},
+		restoreFn: func(_ context.Context, _, _ string) error {
+			return errors.New("restore device error")
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("want nil error (result carries manifest), got %v", err)
+	}
+	if res.Kind != KindFailedUnrecoverable {
+		t.Fatalf("want KindFailedUnrecoverable, got %s", res.Kind)
+	}
+	if res.Manifest == nil {
+		t.Fatal("want non-nil Result.Manifest on unrecoverable failure")
+	}
+
+	manifestPath := recovery.Path(dataRoot)
+	if _, statErr := os.Stat(manifestPath); statErr != nil {
+		t.Fatalf("want recovery manifest at %q after unrecoverable failure, stat: %v", manifestPath, statErr)
+	}
+	m, readErr := recovery.Read(manifestPath)
+	if readErr != nil {
+		t.Fatalf("recovery.Read error: %v", readErr)
+	}
+	if m.AppName != "myapp" {
+		t.Errorf("Manifest.AppName = %q, want %q", m.AppName, "myapp")
+	}
+	if m.SnapshotPath != "snap-unrecoverable" {
+		t.Errorf("Manifest.SnapshotPath = %q, want %q", m.SnapshotPath, "snap-unrecoverable")
+	}
+	if len(m.Steps) == 0 {
+		t.Error("want at least one manual recovery step in Manifest.Steps")
+	}
+	foundRestoreStep := false
+	for _, s := range m.Steps {
+		if strings.HasPrefix(s, "manual-binary-restore:") {
+			foundRestoreStep = true
+			break
+		}
+	}
+	if !foundRestoreStep {
+		t.Errorf("want a step prefixed with 'manual-binary-restore:', got %v", m.Steps)
+	}
+}
+
+// TestPersistRecoveryManifest_NilIsNoOp covers the defensive nil guard inside
+// persistRecoveryManifest. The orchestrator never calls it with nil today, but
+// the guard exists so future call sites cannot panic on a missing manifest.
+func TestPersistRecoveryManifest_NilIsNoOp(t *testing.T) {
+	o := baseOrchestrator(defaultConfig())
+	// No panic, no side effect when manifest is nil.
+	o.persistRecoveryManifest(StateRolledBack, nil)
+}
+
+// TestOrchestrator_RollbackManifestWriteFailureDoesNotMaskCause exercises the
+// best-effort persistence path: when writing the manifest itself fails, the
+// orchestrator must still report the original rollback outcome and must NOT
+// surface a confusing manifest-write error in place of the real cause.
+//
+// We trigger this by pointing DataRoot at a path that exists as a regular file
+// so MkdirAll/CreateTemp fail; the original Kind must still be returned.
+func TestOrchestrator_RollbackManifestWriteFailureDoesNotMaskCause(t *testing.T) {
+	// Create a regular file at the path we will hand to DataRoot.
+	parent := t.TempDir()
+	dataRootAsFile := filepath.Join(parent, "not-a-dir")
+	if err := os.WriteFile(dataRootAsFile, []byte("x"), 0o600); err != nil {
+		t.Fatalf("seed regular file: %v", err)
+	}
+
+	cfg := defaultConfig()
+	cfg.DataRoot = dataRootAsFile // recovery.Write will fail (parent is a file).
+	cfg.BinaryPath = filepath.Join(t.TempDir(), "myapp")
+
+	o := baseOrchestrator(cfg)
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: false, Reason: "boom"}, nil
+		},
+	}
+	o.FS = &mockFsPort{
+		snapshotFn: func(_ context.Context, _, _ string) (string, error) { return "snap-x", nil },
+	}
+
+	// Capture OnRollback notifications so we can confirm the persist failure
+	// is reported via the hook but does not replace the original Kind.
+	var hookCauses []error
+	o.Hooks = Hooks{
+		OnRollback: func(_ State, cause error) {
+			hookCauses = append(hookCauses, cause)
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	if res.Kind != KindRolledBack {
+		t.Fatalf("want KindRolledBack despite persist failure, got %s", res.Kind)
+	}
+	if len(hookCauses) < 2 {
+		t.Fatalf("want >=2 OnRollback notifications (original + persist failure), got %d", len(hookCauses))
+	}
+	// The persist failure must mention the manifest persistence so operators
+	// can trace why no on-disk artifact exists.
+	persistCause := hookCauses[len(hookCauses)-1]
+	if persistCause == nil || !strings.Contains(persistCause.Error(), "persist recovery manifest") {
+		t.Errorf("last OnRollback cause should reference manifest persistence, got %v", persistCause)
 	}
 }

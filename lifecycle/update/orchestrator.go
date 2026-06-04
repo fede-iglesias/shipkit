@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/fede-iglesias/shipkit/lifecycle/migrations"
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/lifecycle/update/ports"
 )
 
@@ -245,6 +246,12 @@ func findAsset(rel ports.Release) (ports.Asset, error) {
 // Returns (Result{KindRolledBack}, nil) on success.
 // Returns (Result{KindFailedUnrecoverable, Manifest: ...}, nil) when rollback itself fails.
 // Never returns a non-nil error (rollback failures are encoded in Result).
+//
+// Before returning on either terminal path the canonical recovery manifest
+// (see lifecycle/recovery) is persisted under o.Cfg.DataRoot so downstream
+// tooling (clean's snapshot protection, doctor's pending-recovery check) can
+// observe the pending recovery. Persistence is best-effort: a write failure
+// is reported via the OnRollback hook but never masks the original cause.
 func (o *Orchestrator) rollback(
 	ctx context.Context,
 	failedAt State,
@@ -255,8 +262,12 @@ func (o *Orchestrator) rollback(
 ) (Result, error) {
 	o.callOnRollback(failedAt, cause)
 
-	manifest := &RecoveryManifest{
-		Cause: cause.Error(),
+	manifest := &recovery.Manifest{
+		Version:      1,
+		AppName:      filepath.Base(o.Cfg.BinaryPath),
+		SnapshotPath: snapshotID,
+		Cause:        cause.Error(),
+		CreatedAt:    o.Clock.NowUTC(),
 	}
 
 	// Determine whether migrations may have been (partially) applied.
@@ -265,10 +276,8 @@ func (o *Orchestrator) rollback(
 		// Best-effort; do not surface the individual migration error here.
 		dataRoot := o.Cfg.DataRoot
 		if revertErr := o.Migrator.Revert(ctx, dataRoot, targetVer, currentVer); revertErr != nil {
-			manifest.Steps = append(manifest.Steps, RecoveryStep{
-				Action: "manual-migration-revert",
-				Detail: revertErr.Error(),
-			})
+			manifest.Steps = append(manifest.Steps,
+				fmt.Sprintf("manual-migration-revert: %s", revertErr.Error()))
 			// Continue to attempt binary restore even if migration revert failed.
 		}
 	}
@@ -276,10 +285,10 @@ func (o *Orchestrator) rollback(
 	// Restore the binary if we have a snapshot (snapshot was taken before download).
 	if StateOrder(failedAt) >= StateOrder(StateDownloadBinary) && snapshotID != "" {
 		if restoreErr := o.FS.Restore(ctx, snapshotID, o.Cfg.BinaryPath); restoreErr != nil {
-			manifest.Steps = append(manifest.Steps, RecoveryStep{
-				Action: "manual-binary-restore",
-				Detail: fmt.Sprintf("snapshot=%s target=%s err=%v", snapshotID, o.Cfg.BinaryPath, restoreErr),
-			})
+			manifest.Steps = append(manifest.Steps,
+				fmt.Sprintf("manual-binary-restore: snapshot=%s target=%s err=%v",
+					snapshotID, o.Cfg.BinaryPath, restoreErr))
+			o.persistRecoveryManifest(failedAt, manifest)
 			return Result{
 				Kind:     KindFailedUnrecoverable,
 				AtState:  StateFailedUnrecoverable,
@@ -289,11 +298,34 @@ func (o *Orchestrator) rollback(
 		}
 	}
 
+	o.persistRecoveryManifest(failedAt, manifest)
 	return Result{
-		Kind:    KindRolledBack,
-		AtState: StateRolledBack,
-		Reason:  cause.Error(),
+		Kind:     KindRolledBack,
+		AtState:  StateRolledBack,
+		Reason:   cause.Error(),
+		Manifest: manifest,
 	}, nil
+}
+
+// persistRecoveryManifest writes the canonical recovery manifest under
+// o.Cfg.DataRoot. The parent directory is created on demand. Any write
+// failure is surfaced through the OnRollback hook so observability is
+// preserved; it must never mask the original rollback cause.
+func (o *Orchestrator) persistRecoveryManifest(failedAt State, m *recovery.Manifest) {
+	if m == nil {
+		return
+	}
+	dataRoot := o.Cfg.DataRoot
+	// Ensure the parent directory exists; ignore the error because the
+	// subsequent recovery.Write call will surface a more specific failure.
+	mkdirFn := o.mkdirAll
+	if mkdirFn == nil {
+		mkdirFn = os.MkdirAll
+	}
+	_ = mkdirFn(dataRoot, 0o700)
+	if writeErr := recovery.Write(recovery.Path(dataRoot), *m); writeErr != nil {
+		o.callOnRollback(failedAt, fmt.Errorf("persist recovery manifest: %w", writeErr))
+	}
 }
 
 // handlePreUpdate runs the StatePreUpdate phase: version resolution, CheckOnly /
