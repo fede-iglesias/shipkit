@@ -2,10 +2,8 @@ module github.com/fede-iglesias/shipkit
 
 go 1.26.3
 
-replace github.com/fede-iglesias/shipkit/adapters => ./adapters
-
 require (
-	github.com/fede-iglesias/shipkit/adapters v0.0.0-00010101000000-000000000000
+	github.com/fede-iglesias/shipkit/adapters v0.1.0
 	github.com/fede-iglesias/shipkit/lifecycle/clean v0.1.0
 	github.com/fede-iglesias/shipkit/lifecycle/doctor v0.1.0
 	github.com/fede-iglesias/shipkit/lifecycle/install v0.1.0
