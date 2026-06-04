@@ -5,10 +5,13 @@ package doctor
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/ports"
 )
 
@@ -177,19 +180,27 @@ func TestCheckAutostart_StatusError(t *testing.T) {
 	}
 }
 
-// --- checkRecoveryManifest: stat error ---
+// --- checkRecoveryManifest: read error ---
+//
+// After the migration to lifecycle/recovery, recovery.Read returns a non
+// fs.ErrNotExist error when the manifest path is unreadable. We simulate this
+// by creating a directory at the canonical manifest path: os.ReadFile then
+// returns "is a directory", which recovery.Read wraps as a non-NotExist error.
+// The check must surface that as StatusWarn.
+func TestCheckRecoveryManifest_ReadError(t *testing.T) {
+	dir := t.TempDir()
+	// Block the canonical manifest path with a directory.
+	if err := os.MkdirAll(filepath.Join(dir, recovery.Filename), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 
-func TestCheckRecoveryManifest_StatError(t *testing.T) {
 	deps := Deps{
 		AppName:  "myapp",
-		DataRoot: "/tmp/data",
-		StatFileFunc: func(path string) (bool, error) {
-			return false, fmt.Errorf("I/O error")
-		},
+		DataRoot: dir,
 	}
 	c := checkRecoveryManifest(deps)
 	if c.Status != StatusWarn {
-		t.Errorf("recovery manifest stat error: got %s, want warn", c.Status)
+		t.Errorf("recovery manifest read error: got %s, want warn", c.Status)
 	}
 }
 

@@ -2,15 +2,16 @@ package clean
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/ports"
 )
 
@@ -127,14 +128,6 @@ type Result struct {
 	Items []CleanedItem
 }
 
-// RecoveryManifest is the minimal shape of .shipkit.recovery-manifest.json
-// that clean needs to read. Only SnapshotPath is used for protection checks.
-type RecoveryManifest struct {
-	// SnapshotPath is the absolute path of the snapshot that was active when
-	// the recovery manifest was written. Clean refuses to delete this path.
-	SnapshotPath string `json:"snapshot_path"`
-}
-
 // Deps holds the injected ports and functions that Run needs. All fields are
 // required; nil values cause nil-pointer panics at runtime. Use the Default*
 // functions to wire production implementations.
@@ -171,9 +164,10 @@ type Deps struct {
 	ListLogsFunc func(logsDir string) ([]LogEntry, error)
 
 	// ReadManifestFunc reads the recovery manifest at manifestPath.
-	// Returns (nil, nil) when the manifest does not exist.
+	// Returns (nil, nil) when the manifest does not exist. The canonical
+	// on-disk format lives in lifecycle/recovery.
 	// Inject DefaultReadManifest in production; inject a stub in tests.
-	ReadManifestFunc func(manifestPath string) (*RecoveryManifest, error)
+	ReadManifestFunc func(manifestPath string) (*recovery.Manifest, error)
 }
 
 // Run executes the clean state machine:
@@ -330,7 +324,7 @@ func collectSnapshots(deps Deps, opts Options, snapshotDir, dataDir string, now 
 	}
 
 	// Read recovery manifest to identify protected snapshots.
-	manifestPath := filepath.Join(dataDir, ".shipkit.recovery-manifest.json")
+	manifestPath := recovery.Path(dataDir)
 	var protectedPath string
 	if deps.ReadManifestFunc != nil {
 		manifest, manifestErr := deps.ReadManifestFunc(manifestPath)
@@ -505,19 +499,15 @@ func DefaultListLogs(logsDir string) ([]LogEntry, error) {
 }
 
 // DefaultReadManifest is the production implementation of ReadManifestFunc.
-// It reads and parses .shipkit.recovery-manifest.json at manifestPath.
-// Returns (nil, nil) when the file does not exist.
-func DefaultReadManifest(manifestPath string) (*RecoveryManifest, error) {
-	data, err := os.ReadFile(manifestPath)
+// It delegates to lifecycle/recovery.Read for parsing the canonical on-disk
+// format. Returns (nil, nil) when the file does not exist.
+func DefaultReadManifest(manifestPath string) (*recovery.Manifest, error) {
+	m, err := recovery.Read(manifestPath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
-	}
-	var m RecoveryManifest
-	if jsonErr := json.Unmarshal(data, &m); jsonErr != nil {
-		return nil, jsonErr
 	}
 	return &m, nil
 }

@@ -3,11 +3,13 @@ package doctor_test
 import (
 	"context"
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/fede-iglesias/shipkit/lifecycle/doctor"
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/ports"
 )
 
@@ -448,8 +450,8 @@ func TestRun_Autostart_EnabledNotInstalled(t *testing.T) {
 
 func TestRun_RecoveryManifest_Pass(t *testing.T) {
 	deps := newDeps("myapp", "/usr/local/bin/myapp", "0.1.0")
-	// No manifest file.
-	deps.StatFileFunc = func(path string) (bool, error) { return false, nil }
+	// Point DataRoot at a fresh temp dir with no manifest file.
+	deps.DataRoot = t.TempDir()
 
 	report, err := doctor.Run(context.Background(), deps, doctor.Options{})
 	if err != nil {
@@ -466,12 +468,16 @@ func TestRun_RecoveryManifest_Pass(t *testing.T) {
 
 func TestRun_RecoveryManifest_Fail(t *testing.T) {
 	deps := newDeps("myapp", "/usr/local/bin/myapp", "0.1.0")
-	// Manifest file exists (bad state).
-	deps.StatFileFunc = func(path string) (bool, error) {
-		if strings.Contains(path, "recovery-manifest") {
-			return true, nil
-		}
-		return false, nil
+	// Write a real recovery manifest at the canonical path under DataRoot.
+	dataRoot := t.TempDir()
+	deps.DataRoot = dataRoot
+	manifest := recovery.Manifest{
+		Version:   1,
+		AppName:   "myapp",
+		CreatedAt: fixedTime,
+	}
+	if err := recovery.Write(recovery.Path(dataRoot), manifest); err != nil {
+		t.Fatalf("recovery.Write: %v", err)
 	}
 
 	report, err := doctor.Run(context.Background(), deps, doctor.Options{})
@@ -482,6 +488,43 @@ func TestRun_RecoveryManifest_Fail(t *testing.T) {
 	check := findCheck(t, report, "recovery.manifest")
 	if check.Status != doctor.StatusFail {
 		t.Errorf("recovery.manifest present: got %s, want fail", check.Status)
+	}
+}
+
+// TestDoctor_RecoveryManifestCheck_DetectsPending exercises the full doctor
+// pipeline against a real recovery manifest written via recovery.Write at the
+// canonical path. After migration, doctor.Run consumes the manifest directly
+// via recovery.Read (no StatFileFunc indirection), and the recovery.manifest
+// check must report StatusFail with details mentioning the manifest path.
+func TestDoctor_RecoveryManifestCheck_DetectsPending(t *testing.T) {
+	deps := newDeps("myapp", "/usr/local/bin/myapp", "0.1.0")
+	dataRoot := t.TempDir()
+	deps.DataRoot = dataRoot
+
+	manifest := recovery.Manifest{
+		Version:      1,
+		AppName:      "myapp",
+		SnapshotPath: filepath.Join(dataRoot, "snapshots", "snap-active"),
+		Steps:        []string{"pre-update", "snapshot"},
+		Cause:        "health-check failed",
+		CreatedAt:    fixedTime,
+	}
+	manifestPath := recovery.Path(dataRoot)
+	if err := recovery.Write(manifestPath, manifest); err != nil {
+		t.Fatalf("recovery.Write: %v", err)
+	}
+
+	report, err := doctor.Run(context.Background(), deps, doctor.Options{})
+	if err != nil {
+		t.Fatalf("Run failed: %v", err)
+	}
+
+	check := findCheck(t, report, "recovery.manifest")
+	if check.Status != doctor.StatusFail {
+		t.Fatalf("recovery.manifest: got %s, want fail (manifest exists)", check.Status)
+	}
+	if !strings.Contains(check.Details, manifestPath) {
+		t.Errorf("recovery.manifest details should mention the manifest path %q, got: %s", manifestPath, check.Details)
 	}
 }
 

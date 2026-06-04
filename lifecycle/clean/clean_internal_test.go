@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 )
 
 // TestDefaultListSnapshots_Empty verifies that listing a non-existent dir returns nil.
@@ -179,8 +181,8 @@ func TestDefaultReadManifest_Missing(t *testing.T) {
 // TestDefaultReadManifest_Valid verifies parsing of a valid manifest JSON.
 func TestDefaultReadManifest_Valid(t *testing.T) {
 	dir := t.TempDir()
-	manifestPath := filepath.Join(dir, ".shipkit.recovery-manifest.json")
-	data, _ := json.Marshal(RecoveryManifest{SnapshotPath: "/data/snaps/snap-abc"})
+	manifestPath := filepath.Join(dir, recovery.Filename)
+	data, _ := json.Marshal(recovery.Manifest{SnapshotPath: "/data/snaps/snap-abc"})
 	if err := os.WriteFile(manifestPath, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +202,7 @@ func TestDefaultReadManifest_Valid(t *testing.T) {
 // TestDefaultReadManifest_Invalid verifies error on invalid JSON.
 func TestDefaultReadManifest_Invalid(t *testing.T) {
 	dir := t.TempDir()
-	manifestPath := filepath.Join(dir, ".shipkit.recovery-manifest.json")
+	manifestPath := filepath.Join(dir, recovery.Filename)
 	if err := os.WriteFile(manifestPath, []byte("{invalid json}"), 0o644); err != nil {
 		t.Fatal(err)
 	}

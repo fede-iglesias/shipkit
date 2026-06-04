@@ -53,11 +53,14 @@ package doctor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/ports"
 )
 
@@ -229,9 +232,12 @@ type Deps struct {
 	StatDirFunc func(path string) (bool, error)
 
 	// StatFileFunc reports whether a file at path exists. Used for completion
-	// file presence and recovery manifest detection. When nil:
-	//   - completion.* uses StatusWarn.
-	//   - recovery.manifest uses StatusPass (safe: assumes no manifest).
+	// file presence. When nil, completion.* uses StatusWarn.
+	//
+	// Note: the recovery.manifest check no longer goes through this function.
+	// After v0.2.0 it reads the canonical manifest directly via
+	// lifecycle/recovery so the check returns a well-typed result rather than a
+	// boolean.
 	StatFileFunc func(path string) (bool, error)
 
 	// ReadMarkerFunc reads the content of the .shipkit.installed marker file.
@@ -622,31 +628,18 @@ func checkAutostart(deps Deps) Check {
 }
 
 // checkRecoveryManifest returns the recovery.manifest check.
-// Fail: the manifest file exists (a previous update failed unrecoverably).
+// Fail: the manifest file exists and parses (a previous update failed unrecoverably).
 // Pass: no manifest.
-// Uses StatFileFunc; when nil, returns pass (safe assumption: no manifest).
+// Warn: the manifest path is unreadable for some reason other than absence.
+//
+// The check reads the canonical manifest directly via lifecycle/recovery; no
+// StatFileFunc indirection is required.
 func checkRecoveryManifest(deps Deps) Check {
-	manifestPath := filepath.Join(deps.DataRoot, ".shipkit.recovery-manifest.json")
+	manifestPath := recovery.Path(deps.DataRoot)
 
-	if deps.StatFileFunc == nil {
-		return Check{
-			ID:      "recovery.manifest",
-			Title:   "recovery manifest",
-			Status:  StatusPass,
-			Details: "no recovery manifest pending",
-		}
-	}
-
-	exists, err := deps.StatFileFunc(manifestPath)
-	if err != nil {
-		return Check{
-			ID:      "recovery.manifest",
-			Title:   "recovery manifest",
-			Status:  StatusWarn,
-			Details: fmt.Sprintf("cannot check manifest at %s: %v", manifestPath, err),
-		}
-	}
-	if exists {
+	_, err := recovery.Read(manifestPath)
+	switch {
+	case err == nil:
 		return Check{
 			ID:      "recovery.manifest",
 			Title:   "recovery manifest",
@@ -654,12 +647,20 @@ func checkRecoveryManifest(deps Deps) Check {
 			Details: fmt.Sprintf("recovery manifest found at %s: previous update failed", manifestPath),
 			Hint:    fmt.Sprintf("run `%s update` to retry, or `%s install --force` to recover", deps.AppName, deps.AppName),
 		}
-	}
-	return Check{
-		ID:      "recovery.manifest",
-		Title:   "recovery manifest",
-		Status:  StatusPass,
-		Details: "no recovery manifest pending",
+	case errors.Is(err, fs.ErrNotExist):
+		return Check{
+			ID:      "recovery.manifest",
+			Title:   "recovery manifest",
+			Status:  StatusPass,
+			Details: "no recovery manifest pending",
+		}
+	default:
+		return Check{
+			ID:      "recovery.manifest",
+			Title:   "recovery manifest",
+			Status:  StatusWarn,
+			Details: fmt.Sprintf("cannot read manifest at %s: %v", manifestPath, err),
+		}
 	}
 }
 
