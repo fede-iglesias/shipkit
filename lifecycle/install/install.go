@@ -240,7 +240,7 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 
 	// Step 3: idempotency check.
 	if !opts.Force {
-		if existing, err := readMarker(markerPath); err == nil {
+		if existing, err := readMarker(ctx, deps, markerPath); err == nil {
 			// Marker exists - already installed.
 			binDir := filepath.Dir(binPath)
 			return Result{
@@ -265,7 +265,7 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 	var completionShells []ports.ShellKind
 
 	// Step 4: create data directory.
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := deps.FS.MkdirAll(ctx, dataDir, 0o755); err != nil {
 		return Result{}, fmt.Errorf("install: create data dir %s: %w", dataDir, err)
 	}
 	manifest = append(manifest, dataDir)
@@ -302,7 +302,7 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 		}
 
 		// Ensure parent dir exists.
-		if err := os.MkdirAll(filepath.Dir(compPath), 0o755); err != nil {
+		if err := deps.FS.MkdirAll(ctx, filepath.Dir(compPath), 0o755); err != nil {
 			return Result{}, fmt.Errorf("install: create completion dir: %w", err)
 		}
 
@@ -311,7 +311,7 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 		if err := deps.Completion.EmitCompletion(shell, root, &buf); err != nil {
 			return Result{}, fmt.Errorf("install: emit completion for %s: %w", shell, err)
 		}
-		if err := atomicWriteBytes(compPath, buf.Bytes(), 0o644); err != nil {
+		if err := deps.FS.AtomicWrite(ctx, compPath, buf.Bytes(), 0o644); err != nil {
 			return Result{}, fmt.Errorf("install: write completion %s: %w", compPath, err)
 		}
 		completionsWritten[shell] = compPath
@@ -367,7 +367,7 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 	// and a slice of ShellKind (string), so this panic is a compile-time
 	// invariant guard, not a runtime error path.
 	markerJSON := marshalInstallMarker(marker)
-	if err := atomicWriteBytes(markerPath, markerJSON, 0o644); err != nil {
+	if err := deps.FS.AtomicWrite(ctx, markerPath, markerJSON, 0o644); err != nil {
 		return Result{}, fmt.Errorf("install: write marker: %w", err)
 	}
 	manifest = append(manifest, markerPath)
@@ -399,10 +399,10 @@ func shouldSkipBash32(env ports.EnvPort, w io.Writer) bool {
 	return false
 }
 
-// readMarker reads and parses the marker file at path.
+// readMarker reads and parses the marker file at path via the filesystem port.
 // Returns an error if the file does not exist or is not valid JSON.
-func readMarker(path string) (InstallMarker, error) {
-	raw, err := os.ReadFile(path)
+func readMarker(ctx context.Context, deps Deps, path string) (InstallMarker, error) {
+	raw, err := deps.FS.ReadFile(ctx, path)
 	if err != nil {
 		return InstallMarker{}, err
 	}
@@ -420,76 +420,6 @@ func readMarker(path string) (InstallMarker, error) {
 func marshalInstallMarker(m InstallMarker) []byte {
 	b, _ := json.MarshalIndent(m, "", "  ")
 	return b
-}
-
-// atomicWriteHooks holds injectable overrides for atomicWriteBytes operations.
-// All fields default to nil, meaning the real OS operations are used.
-// Tests can replace individual hooks to simulate OS-level errors.
-type atomicWriteHooks struct {
-	// writeFunc overrides the tmp.Write call when non-nil.
-	writeFunc func(f *os.File, data []byte) error
-	// chmodFunc overrides the tmp.Chmod call when non-nil.
-	chmodFunc func(f *os.File, mode os.FileMode) error
-	// closeFunc overrides the tmp.Close call when non-nil.
-	closeFunc func(f *os.File) error
-}
-
-// atomicWriteBytes writes data to path atomically: writes to a temp file in the
-// same directory, then renames it to path. This prevents partial writes from
-// leaving a corrupted file.
-//
-// hooks allows tests to inject errors into individual file operations. Pass a
-// zero-value atomicWriteHooks{} for the default real-OS behaviour.
-func atomicWriteBytes(path string, data []byte, mode os.FileMode) error {
-	return atomicWriteBytesHooked(path, data, mode, atomicWriteHooks{})
-}
-
-// atomicWriteBytesHooked is the internal implementation; it accepts hooks for
-// test-injecting errors into the tmp file write, chmod, and close operations.
-func atomicWriteBytesHooked(path string, data []byte, mode os.FileMode, h atomicWriteHooks) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".shipkit-install-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() {
-		// Best-effort cleanup if rename fails or an earlier step errored.
-		os.Remove(tmpName)
-	}()
-
-	writeErr := func(f *os.File, d []byte) error {
-		if h.writeFunc != nil {
-			return h.writeFunc(f, d)
-		}
-		_, err := f.Write(d)
-		return err
-	}
-	chmodErr := func(f *os.File, m os.FileMode) error {
-		if h.chmodFunc != nil {
-			return h.chmodFunc(f, m)
-		}
-		return f.Chmod(m)
-	}
-	closeErr := func(f *os.File) error {
-		if h.closeFunc != nil {
-			return h.closeFunc(f)
-		}
-		return f.Close()
-	}
-
-	if err := writeErr(tmp, data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := chmodErr(tmp, mode); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := closeErr(tmp); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
 }
 
 // shellRcPath returns the canonical RC file path for the given shell and home

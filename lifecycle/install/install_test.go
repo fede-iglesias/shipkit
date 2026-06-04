@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,9 @@ var fixedTime = time.Date(2026, 6, 4, 12, 0, 0, 0, time.UTC)
 // newDeps returns a fully-wired Deps with safe mock ports and a temp data dir.
 // The MockPathsPort DataDir returns a real temp directory so WriteMarker can
 // actually write the JSON file.
+//
+// MkdirAllFunc, ReadFileFunc, and AtomicWriteFunc are wired to real OS
+// implementations so that tests asserting on disk state continue to work.
 func newDeps(t *testing.T) (install.Deps, string) {
 	t.Helper()
 	dataDir := t.TempDir()
@@ -41,9 +46,45 @@ func newDeps(t *testing.T) (install.Deps, string) {
 		Version:    "v0.1.0",
 	}
 
+	mockFS := ports.NewMockFsPort()
+	mockFS.MkdirAllFunc = func(_ context.Context, path string, perm fs.FileMode) error {
+		return os.MkdirAll(path, perm)
+	}
+	mockFS.ReadFileFunc = func(_ context.Context, path string) ([]byte, error) {
+		return os.ReadFile(path)
+	}
+	mockFS.AtomicWriteFunc = func(_ context.Context, path string, data []byte, perm fs.FileMode) error {
+		dir := filepath.Dir(path)
+		tmp, err := os.CreateTemp(dir, ".shipkit-test-*")
+		if err != nil {
+			return fmt.Errorf("atomic write: create temp: %w", err)
+		}
+		tmpName := tmp.Name()
+		cleanup := func() { _ = os.Remove(tmpName) }
+		if _, err := tmp.Write(data); err != nil {
+			tmp.Close()
+			cleanup()
+			return fmt.Errorf("atomic write: write: %w", err)
+		}
+		if err := tmp.Chmod(perm); err != nil {
+			tmp.Close()
+			cleanup()
+			return fmt.Errorf("atomic write: chmod: %w", err)
+		}
+		if err := tmp.Close(); err != nil {
+			cleanup()
+			return fmt.Errorf("atomic write: close: %w", err)
+		}
+		if err := os.Rename(tmpName, path); err != nil {
+			cleanup()
+			return fmt.Errorf("atomic write: rename: %w", err)
+		}
+		return nil
+	}
+
 	deps := install.Deps{
 		Cfg:        cfg,
-		FS:         ports.NewMockFsPort(),
+		FS:         mockFS,
 		Paths:      paths,
 		Env:        env,
 		ShellRc:    ports.NewMockShellRcPort(),

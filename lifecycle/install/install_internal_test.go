@@ -2,6 +2,8 @@ package install
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -54,10 +56,18 @@ func TestConfigBinaryName_DefaultAndCustom(t *testing.T) {
 func TestReadMarker_InvalidJSON(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, markerFileName)
-	if err := os.WriteFile(path, []byte("NOT_JSON"), 0o644); err != nil {
-		t.Fatal(err)
+	raw := []byte("NOT_JSON")
+
+	mockFS := ports.NewMockFsPort()
+	mockFS.ReadFileFunc = func(_ context.Context, p string) ([]byte, error) {
+		if p == path {
+			return raw, nil
+		}
+		return nil, os.ErrNotExist
 	}
-	_, err := readMarker(path)
+	deps := Deps{FS: mockFS}
+
+	_, err := readMarker(context.Background(), deps, path)
 	if err == nil {
 		t.Error("readMarker should return error for invalid JSON")
 	}
@@ -65,38 +75,21 @@ func TestReadMarker_InvalidJSON(t *testing.T) {
 
 // TestReadMarker_FileNotFound verifies readMarker returns error when absent.
 func TestReadMarker_FileNotFound(t *testing.T) {
-	_, err := readMarker("/nonexistent/path/.shipkit.installed")
+	mockFS := ports.NewMockFsPort()
+	mockFS.ReadFileFunc = func(_ context.Context, _ string) ([]byte, error) {
+		return nil, os.ErrNotExist
+	}
+	deps := Deps{FS: mockFS}
+
+	_, err := readMarker(context.Background(), deps, "/nonexistent/path/.shipkit.installed")
 	if err == nil {
 		t.Error("readMarker should return error for missing file")
 	}
-}
-
-// TestAtomicWriteBytes_Success verifies the happy path write+rename.
-func TestAtomicWriteBytes_Success(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-	data := []byte("hello atomic")
-
-	if err := atomicWriteBytes(path, data, 0o644); err != nil {
-		t.Fatalf("atomicWriteBytes error: %v", err)
-	}
-
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read: %v", err)
-	}
-	if !bytes.Equal(got, data) {
-		t.Errorf("data = %q; want %q", got, data)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("expected os.ErrNotExist; got %v", err)
 	}
 }
 
-// TestAtomicWriteBytes_BadDir verifies error when the dir does not exist.
-func TestAtomicWriteBytes_BadDir(t *testing.T) {
-	err := atomicWriteBytes("/nonexistent/dir/file.txt", []byte("x"), 0o644)
-	if err == nil {
-		t.Error("expected error writing to nonexistent dir")
-	}
-}
 
 // TestShellRcPath_Bash verifies .bashrc path.
 func TestShellRcPath_Bash(t *testing.T) {
@@ -194,69 +187,6 @@ func TestFpathBlock_EmptyPath(t *testing.T) {
 	block := fpathBlock("myapp", "")
 	if !bytes.Contains([]byte(block), []byte("myapp")) {
 		t.Errorf("fpathBlock placeholder does not mention app: %q", block)
-	}
-}
-
-// TestAtomicWriteBytes_Overwrite verifies that atomicWriteBytes replaces existing file.
-func TestAtomicWriteBytes_Overwrite(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-
-	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := atomicWriteBytes(path, []byte("new"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	got, _ := os.ReadFile(path)
-	if string(got) != "new" {
-		t.Errorf("content = %q; want %q", got, "new")
-	}
-}
-
-// TestAtomicWriteBytesHooked_WriteError verifies error path when write fails.
-func TestAtomicWriteBytesHooked_WriteError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-	hooks := atomicWriteHooks{
-		writeFunc: func(_ *os.File, _ []byte) error {
-			return os.ErrInvalid
-		},
-	}
-	err := atomicWriteBytesHooked(path, []byte("x"), 0o644, hooks)
-	if err == nil {
-		t.Error("expected error from write hook")
-	}
-}
-
-// TestAtomicWriteBytesHooked_ChmodError verifies error path when chmod fails.
-func TestAtomicWriteBytesHooked_ChmodError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-	hooks := atomicWriteHooks{
-		chmodFunc: func(_ *os.File, _ os.FileMode) error {
-			return os.ErrPermission
-		},
-	}
-	err := atomicWriteBytesHooked(path, []byte("x"), 0o644, hooks)
-	if err == nil {
-		t.Error("expected error from chmod hook")
-	}
-}
-
-// TestAtomicWriteBytesHooked_CloseError verifies error path when close fails.
-func TestAtomicWriteBytesHooked_CloseError(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "out.txt")
-	hooks := atomicWriteHooks{
-		closeFunc: func(_ *os.File) error {
-			return os.ErrInvalid
-		},
-	}
-	err := atomicWriteBytesHooked(path, []byte("x"), 0o644, hooks)
-	if err == nil {
-		t.Error("expected error from close hook")
 	}
 }
 
