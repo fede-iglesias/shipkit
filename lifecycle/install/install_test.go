@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -596,7 +597,7 @@ func TestRun_ContextCancelled_ReturnsError(t *testing.T) {
 	deps, dataDir := newDeps(t)
 	// Inject a completion port that blocks until ctx is cancelled.
 	mockCP := ports.NewMockCompletionPort()
-	mockCP.EmitCompletionFunc = func(shell ports.ShellKind, root *cobra.Command, dst interface{ Write([]byte) (int, error) }) error {
+	mockCP.EmitCompletionFunc = func(shell ports.ShellKind, root *cobra.Command, dst io.Writer) error {
 		return context.Canceled
 	}
 	deps.Completion = mockCP
@@ -656,7 +657,7 @@ func TestRun_CompletionEmitError_ReturnsError(t *testing.T) {
 	env.ShellResult = ports.ShellZsh
 
 	mockCP := ports.NewMockCompletionPort()
-	mockCP.EmitCompletionFunc = func(_ ports.ShellKind, _ *cobra.Command, _ interface{ Write([]byte) (int, error) }) error {
+	mockCP.EmitCompletionFunc = func(_ ports.ShellKind, _ *cobra.Command, _ io.Writer) error {
 		return os.ErrPermission
 	}
 	deps.Completion = mockCP
@@ -721,6 +722,131 @@ func TestRun_BashVersion_EnvKey(t *testing.T) {
 	mockCP := deps.Completion.(*ports.MockCompletionPort)
 	if len(mockCP.EmitCompletionCalls) == 0 {
 		t.Error("bash completion should be emitted on linux regardless of version")
+	}
+}
+
+// TestRun_MkdirAll_DataDir_Error asserts Run returns error when os.MkdirAll
+// fails for the data directory (parent is read-only).
+func TestRun_MkdirAll_DataDir_Error(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; permission check not meaningful")
+	}
+	deps, _ := newDeps(t)
+	roParent := t.TempDir()
+	if err := os.Chmod(roParent, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(roParent, 0o755) })
+
+	// Point DataDir to a new subdirectory under the read-only parent.
+	paths := deps.Paths.(*ports.MockPathsPort)
+	paths.DataDirFunc = func(app string) (string, error) {
+		return filepath.Join(roParent, "newsubdir"), nil
+	}
+
+	_, err := install.Run(context.Background(), deps, install.Options{}, newRootCmd())
+	if err == nil {
+		t.Error("expected error when os.MkdirAll on dataDir fails")
+	}
+}
+
+// TestRun_UserHome_Error_FallbackToEmpty asserts that UserHome error causes home
+// to fall back to "" and Run still completes (completions use "" as home).
+func TestRun_UserHome_Error_FallbackToEmpty(t *testing.T) {
+	deps, _ := newDeps(t)
+	paths := deps.Paths.(*ports.MockPathsPort)
+	paths.UserHomeErr = os.ErrPermission
+	paths.UserHomeResult = ""
+
+	// With unknown shell, no completion or shellrc writes occur, so
+	// the empty home fallback is harmless.
+	env := deps.Env.(*ports.MockEnvPort)
+	env.ShellResult = ports.ShellUnknown
+
+	_, err := install.Run(context.Background(), deps, install.Options{}, newRootCmd())
+	if err != nil {
+		t.Fatalf("Run should succeed despite UserHome error (fallback to empty): %v", err)
+	}
+}
+
+// TestRun_CompletionPath_Error asserts Run returns error when CompletionPath fails.
+func TestRun_CompletionPath_Error(t *testing.T) {
+	deps, _ := newDeps(t)
+	env := deps.Env.(*ports.MockEnvPort)
+	env.ShellResult = ports.ShellZsh
+
+	mockCP := ports.NewMockCompletionPort()
+	mockCP.CompletionPathFunc = func(_ ports.ShellKind, _, _ string) (string, error) {
+		return "", os.ErrPermission
+	}
+	deps.Completion = mockCP
+
+	_, err := install.Run(context.Background(), deps, install.Options{}, newRootCmd())
+	if err == nil {
+		t.Error("expected error when CompletionPath fails")
+	}
+}
+
+// TestRun_CompletionDir_MkdirError asserts Run returns error when completion
+// parent directory cannot be created. We use a path whose parent is a file
+// (making MkdirAll fail).
+func TestRun_CompletionDir_MkdirError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; permission check not meaningful")
+	}
+	deps, _ := newDeps(t)
+	env := deps.Env.(*ports.MockEnvPort)
+	env.ShellResult = ports.ShellZsh
+
+	// Return a path whose parent is a read-only directory.
+	roDir := t.TempDir()
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(roDir, 0o755) })
+
+	mockCP := ports.NewMockCompletionPort()
+	mockCP.CompletionPathFunc = func(_ ports.ShellKind, _, _ string) (string, error) {
+		// Return a path inside a read-only dir's subdirectory.
+		return filepath.Join(roDir, "newsubdir", "completion"), nil
+	}
+	deps.Completion = mockCP
+
+	_, err := install.Run(context.Background(), deps, install.Options{}, newRootCmd())
+	if err == nil {
+		t.Error("expected error when completion parent dir cannot be created")
+	}
+}
+
+// TestRun_CompletionWrite_AtomicError asserts Run returns error when the
+// completion script file cannot be written (read-only directory).
+func TestRun_CompletionWrite_AtomicError(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("running as root; permission check not meaningful")
+	}
+	deps, _ := newDeps(t)
+	env := deps.Env.(*ports.MockEnvPort)
+	env.ShellResult = ports.ShellZsh
+
+	// Create a read-only directory for the completion file to land in.
+	roDir := t.TempDir()
+	compPath := filepath.Join(roDir, "_testapp")
+
+	mockCP := ports.NewMockCompletionPort()
+	mockCP.CompletionPathFunc = func(_ ports.ShellKind, _, _ string) (string, error) {
+		return compPath, nil
+	}
+	deps.Completion = mockCP
+
+	// Make roDir read-only AFTER path resolution.
+	if err := os.Chmod(roDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(roDir, 0o755) })
+
+	_, err := install.Run(context.Background(), deps, install.Options{}, newRootCmd())
+	if err == nil {
+		t.Error("expected error when completion write fails on read-only directory")
 	}
 }
 
