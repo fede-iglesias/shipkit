@@ -1,2 +1,4 @@
 github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0 h1:o22zMiKLjwt5ieJi8vkkDcgKreT9VSGr4xuvo4pXKRY=
 github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0/go.mod h1:lrKWFB3Xj464Vk5nhBHpljZj0mWJRu2K/AawAnxTMOI=
+github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0 h1:dR1lA/KOWGaHTSmjgqcbpPL+hMIdpAsDHjAyi0IxnK4=
+github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0/go.mod h1:WixpKKr3wRgTniGVjT6REdSnKYoh4UCEikV63x6Z17M=
