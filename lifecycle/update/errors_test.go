@@ -1,11 +1,11 @@
 package update_test
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/lifecycle/update"
 )
 
@@ -101,9 +101,11 @@ func TestRollbackError(t *testing.T) {
 // TestRollbackUnrecoverableError verifies Error() format, Unwrap(), and Manifest presence.
 func TestRollbackUnrecoverableError(t *testing.T) {
 	cause := errors.New("catastrophic failure")
-	manifest := &update.RecoveryManifest{
-		Steps: []update.RecoveryStep{
-			{Action: "manual-binary-restore", Detail: "copy /tmp/snap to /usr/local/bin/myapp"},
+	manifest := &recovery.Manifest{
+		Version: 1,
+		AppName: "myapp",
+		Steps: []string{
+			"manual-binary-restore: copy /tmp/snap to /usr/local/bin/myapp",
 		},
 		Cause: cause.Error(),
 	}
@@ -122,58 +124,8 @@ func TestRollbackUnrecoverableError(t *testing.T) {
 	if e.Manifest == nil {
 		t.Error("RollbackUnrecoverableError.Manifest is nil, want non-nil")
 	}
-}
-
-// TestRecoveryManifest_JSONRoundtrip verifies JSON marshal/unmarshal roundtrip.
-func TestRecoveryManifest_JSONRoundtrip(t *testing.T) {
-	original := &update.RecoveryManifest{
-		Steps: []update.RecoveryStep{
-			{Action: "manual-binary-restore", Detail: "snapshot at /data/snapshots/myapp-0.0.11-123"},
-			{Action: "manual-health-verify", Detail: "expected 0.0.11 got 0.0.12"},
-		},
-		Cause: "atomic replace failed: disk full",
-	}
-
-	data, err := json.Marshal(original)
-	if err != nil {
-		t.Fatalf("json.Marshal(RecoveryManifest) error: %v", err)
-	}
-
-	var decoded update.RecoveryManifest
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal(RecoveryManifest) error: %v", err)
-	}
-
-	if decoded.Cause != original.Cause {
-		t.Errorf("Cause: got %q, want %q", decoded.Cause, original.Cause)
-	}
-	if len(decoded.Steps) != len(original.Steps) {
-		t.Fatalf("Steps len: got %d, want %d", len(decoded.Steps), len(original.Steps))
-	}
-	for i, step := range decoded.Steps {
-		orig := original.Steps[i]
-		if step.Action != orig.Action || step.Detail != orig.Detail {
-			t.Errorf("Step[%d]: got {%q %q}, want {%q %q}", i, step.Action, step.Detail, orig.Action, orig.Detail)
-		}
-	}
-}
-
-// TestRecoveryManifest_JSONFieldNames verifies JSON field names match the contract.
-func TestRecoveryManifest_JSONFieldNames(t *testing.T) {
-	m := &update.RecoveryManifest{
-		Steps: []update.RecoveryStep{{Action: "a", Detail: "d"}},
-		Cause: "c",
-	}
-	data, err := json.Marshal(m)
-	if err != nil {
-		t.Fatalf("json.Marshal error: %v", err)
-	}
-	raw := string(data)
-
-	for _, field := range []string{`"steps"`, `"cause"`, `"action"`, `"detail"`} {
-		if !contains(raw, field) {
-			t.Errorf("JSON output missing field %s: %s", field, raw)
-		}
+	if len(e.Manifest.Steps) != 1 || e.Manifest.Steps[0] == "" {
+		t.Errorf("RollbackUnrecoverableError.Manifest.Steps = %v, want one non-empty entry", e.Manifest.Steps)
 	}
 }
 

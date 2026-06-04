@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 )
 
 // Config holds the static configuration for the update subsystem.
@@ -136,8 +138,9 @@ type Result struct {
 	Reason string
 
 	// Manifest holds manual recovery steps and is populated only when
-	// Kind is KindFailedUnrecoverable.
-	Manifest *RecoveryManifest
+	// Kind is KindFailedUnrecoverable. The shape is owned by
+	// lifecycle/recovery so clean and doctor can read the same on-disk file.
+	Manifest *recovery.Manifest
 }
 
 // OrchestratorRunner is the state-machine driver. The production implementation

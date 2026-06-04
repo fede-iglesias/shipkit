@@ -3,6 +3,8 @@ package update
 import (
 	"errors"
 	"fmt"
+
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 )
 
 // ErrTarballEntryEscapes is returned when a tarball entry resolves to a path
@@ -90,11 +92,11 @@ func (e *RollbackError) Error() string {
 func (e *RollbackError) Unwrap() error { return e.Err }
 
 // RollbackUnrecoverableError is returned when the rollback itself encounters an
-// unrecoverable failure. The Manifest field contains the human-readable recovery
-// steps that the operator must perform manually.
+// unrecoverable failure. The Manifest field references the canonical recovery
+// manifest (see lifecycle/recovery) that the operator must follow manually.
 type RollbackUnrecoverableError struct {
-	// Manifest holds the manual recovery steps.
-	Manifest *RecoveryManifest
+	// Manifest holds the manual recovery steps in the canonical recovery format.
+	Manifest *recovery.Manifest
 	// Err is the underlying cause.
 	Err error
 }
@@ -106,16 +108,3 @@ func (e *RollbackUnrecoverableError) Error() string {
 
 // Unwrap returns the underlying cause so errors.Is and errors.As traverse the chain.
 func (e *RollbackUnrecoverableError) Unwrap() error { return e.Err }
-
-// RecoveryManifest is persisted to disk when an unrecoverable failure occurs.
-// It documents the manual steps the operator must follow to restore the system.
-type RecoveryManifest struct {
-	Steps []RecoveryStep `json:"steps"`
-	Cause string         `json:"cause"`
-}
-
-// RecoveryStep is a single manual action the operator must perform.
-type RecoveryStep struct {
-	Action string `json:"action"`
-	Detail string `json:"detail"`
-}
