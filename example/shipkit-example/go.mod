@@ -3,8 +3,8 @@ module github.com/fede-iglesias/shipkit/example/shipkit-example
 go 1.26.3
 
 require (
-	github.com/fede-iglesias/shipkit v0.1.0
-	github.com/fede-iglesias/shipkit/adapters v0.1.0
+	github.com/fede-iglesias/shipkit v0.2.0
+	github.com/fede-iglesias/shipkit/adapters v0.2.0
 	github.com/sigstore/sigstore-go v1.2.0
 	github.com/spf13/cobra v1.10.2
 )
@@ -90,9 +90,3 @@ require (
 	k8s.io/klog/v2 v2.140.0 // indirect
 )
 
-// replace directives for local development in the shipkit mono-repo.
-// Strip these before creating a release tag for example/shipkit-example.
-replace (
-	github.com/fede-iglesias/shipkit => ../..
-	github.com/fede-iglesias/shipkit/adapters => ../../adapters
-)
