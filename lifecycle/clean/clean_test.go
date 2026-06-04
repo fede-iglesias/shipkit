@@ -3,11 +3,13 @@ package clean_test
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/fede-iglesias/shipkit/lifecycle/clean"
+	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/ports"
 )
 
@@ -181,8 +183,8 @@ func TestRun_RecoveryManifestProtection(t *testing.T) {
 
 	// Wire a recovery manifest that references snap-protected using the same path
 	// that the list func produces.
-	deps.ReadManifestFunc = func(manifestPath string) (*clean.RecoveryManifest, error) {
-		return &clean.RecoveryManifest{
+	deps.ReadManifestFunc = func(manifestPath string) (*recovery.Manifest, error) {
+		return &recovery.Manifest{
 			SnapshotPath: protectedPath,
 		}, nil
 	}
@@ -199,6 +201,66 @@ func TestRun_RecoveryManifestProtection(t *testing.T) {
 	// snap-protected must NOT be removed.
 	if len(fs.RemoveDirCalls) != 1 {
 		t.Errorf("expected exactly 1 removal (snap-deletable only), got %d", len(fs.RemoveDirCalls))
+	}
+	if result.Reclaimed != 2000 {
+		t.Errorf("expected 2000 reclaimed, got %d", result.Reclaimed)
+	}
+}
+
+// TestClean_ReadsRecoveryManifest_ProtectsSnapshot exercises the production
+// DefaultReadManifest path end-to-end: a real manifest is written to disk via
+// recovery.Write, then clean.Run uses clean.DefaultReadManifest to parse it
+// through the canonical recovery package. The referenced snapshot must NOT be
+// removed.
+func TestClean_ReadsRecoveryManifest_ProtectsSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	deps := newDeps(dir)
+	fs := deps.FS.(*ports.MockFsPort)
+
+	dataDir := filepath.Join(dir, "testapp")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir data dir: %v", err)
+	}
+	snapshotDir := filepath.Join(dataDir, "snapshots")
+	protectedPath := filepath.Join(snapshotDir, "snap-protected")
+	deletablePath := filepath.Join(snapshotDir, "snap-deletable")
+
+	manifest := recovery.Manifest{
+		Version:      1,
+		AppName:      "testapp",
+		SnapshotPath: protectedPath,
+		Steps:        []string{"snapshot"},
+		CreatedAt:    fixedNow,
+	}
+	if err := recovery.Write(recovery.Path(dataDir), manifest); err != nil {
+		t.Fatalf("recovery.Write: %v", err)
+	}
+
+	age40 := fixedNow.Add(-40 * 24 * time.Hour)
+	age35 := fixedNow.Add(-35 * 24 * time.Hour)
+	deps.ListSnapshotsFunc = func(sd string) ([]clean.SnapshotEntry, error) {
+		return []clean.SnapshotEntry{
+			{Path: protectedPath, ModTime: age35, Size: 1000},
+			{Path: deletablePath, ModTime: age40, Size: 2000},
+		}, nil
+	}
+	// Wire the production reader so it parses the on-disk JSON via recovery.Read.
+	deps.ReadManifestFunc = clean.DefaultReadManifest
+
+	opts := clean.Options{
+		Snapshots: true,
+		OlderThan: 30 * 24 * time.Hour,
+		Yes:       true,
+	}
+	result, err := clean.Run(context.Background(), deps, opts)
+	if err != nil {
+		t.Fatalf("clean.Run: %v", err)
+	}
+	if len(fs.RemoveDirCalls) != 1 {
+		t.Fatalf("expected 1 removal (snap-deletable only), got %d", len(fs.RemoveDirCalls))
+	}
+	if fs.RemoveDirCalls[0] != deletablePath {
+		t.Errorf("removed %q, want %q (protected snapshot must survive)", fs.RemoveDirCalls[0], deletablePath)
 	}
 	if result.Reclaimed != 2000 {
 		t.Errorf("expected 2000 reclaimed, got %d", result.Reclaimed)
