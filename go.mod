@@ -6,7 +6,7 @@ require (
 	github.com/fede-iglesias/shipkit/adapters v0.2.0
 	github.com/fede-iglesias/shipkit/lifecycle/clean v0.2.0
 	github.com/fede-iglesias/shipkit/lifecycle/doctor v0.2.0
-	github.com/fede-iglesias/shipkit/lifecycle/install v0.2.1
+	github.com/fede-iglesias/shipkit/lifecycle/install v0.2.2
 	github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0
 	github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.1
 	github.com/fede-iglesias/shipkit/lifecycle/update v0.2.0
@@ -21,3 +21,5 @@ require (
 	golang.org/x/sys v0.33.0 // indirect
 	golang.org/x/term v0.32.0 // indirect
 )
+
+retract v0.2.1 // missing go.sum entries for v0.2.1 submodule pins; use v0.2.2

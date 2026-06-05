@@ -242,7 +242,6 @@ func TestInstall_PrintMode_UsesPlan(t *testing.T) {
 	env.ShellResult = ports.ShellZsh
 
 	var buf bytes.Buffer
-	deps.FS = deps.FS // unchanged
 	stderr := &buf
 	opts := install.Options{
 		Print:  true,
