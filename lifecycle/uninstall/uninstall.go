@@ -175,6 +175,13 @@ type Result struct {
 	// NextSteps contains human-readable hints for actions the user must
 	// complete manually (e.g. "sudo rm /usr/local/bin/myapp").
 	NextSteps []string
+
+	// Aborted is true when the user declined the confirmation prompt (or the
+	// non-interactive prompt defaulted to "no"). When Aborted is true, the
+	// uninstall made no mutation and the wrapper should print a visible
+	// "aborted" message so the user does not mistake the silent exit for
+	// success.
+	Aborted bool
 }
 
 // Run executes the uninstall state machine. It progresses through the following
@@ -209,8 +216,11 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 			return Result{}, fmt.Errorf("prompt: %w", err)
 		}
 		if !confirmed {
-			// User declined. No mutation. Exit 0 per spec (section 3.8).
-			return Result{}, nil
+			// User declined (or stdin is non-TTY answering default "no"). No
+			// mutation. Surface the abort so the wrapper prints something
+			// visible instead of exiting 0 with no output: a silent exit looks
+			// indistinguishable from a successful uninstall to the user.
+			return Result{Aborted: true}, nil
 		}
 	}
 

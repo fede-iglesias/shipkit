@@ -49,6 +49,9 @@ func TestRun_PromptDeclined(t *testing.T) {
 	if len(prompt.ConfirmCalls) == 0 {
 		t.Error("expected Confirm to be called at least once; it was not")
 	}
+	if !result.Aborted {
+		t.Error("Result.Aborted: got false, want true (declined prompt must surface the abort)")
+	}
 	if result.BinaryAction != "" {
 		t.Errorf("BinaryAction: got %q, want empty (no mutation)", result.BinaryAction)
 	}

@@ -54,6 +54,10 @@ any changes.`,
 			if err != nil {
 				return err
 			}
+			if result.Aborted {
+				fmt.Fprintln(cmd.OutOrStdout(), "Uninstall aborted: confirmation declined. Re-run with --yes to skip the prompt.")
+				return nil
+			}
 			// Real run: report what was removed first, so the user gets visible
 			// evidence of work done instead of a single terse "Binary:" line.
 			if len(result.Removed) > 0 {
