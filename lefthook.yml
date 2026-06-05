@@ -1,0 +1,24 @@
+# Pre-commit hooks (lefthook).
+#
+# Install in a fresh clone with:
+#   lefthook install
+#
+# Why this exists: v0.2.1 release workflow rejected
+# `lifecycle/install/plan_test.go:245` for a `deps.FS = deps.FS`
+# self-assignment that local `go vet` treated as a warning. The tag was
+# already public, forcing retract + v0.2.2. This hook fails the commit
+# locally on any `go vet` output, matching the CI release behavior.
+#
+# Scope policy: vet only. Gofmt is handled by editors (gopls). Tests are
+# deferred to pre-push to keep commits fast across the 10-module monorepo.
+
+pre-commit:
+  parallel: true
+  commands:
+    go-vet:
+      glob: "*.go"
+      run: bash scripts/precommit-vet.sh {staged_files}
+      stage_fixed: false
+      skip:
+        - merge
+        - rebase
