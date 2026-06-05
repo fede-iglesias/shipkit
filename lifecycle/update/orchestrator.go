@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -279,15 +280,136 @@ func parseSemverInts(v string) [3]int {
 	return r
 }
 
-// findAsset returns the first asset in rel whose name ends with ".tar.gz".
-// Returns an error when no suitable asset is found.
+// hostOS returns the runtime OS used to match asset names. Defined as a
+// function variable so tests can simulate cross-platform hosts.
+var hostOS = func() string { return runtime.GOOS }
+
+// hostArch returns the runtime architecture used to match asset names.
+// Defined as a function variable so tests can simulate cross-platform hosts.
+var hostArch = func() string { return runtime.GOARCH }
+
+// archAliases returns the case-insensitive arch name variants goreleaser is
+// known to emit for a given Go arch. The matcher accepts ANY of the variants.
+//
+// Why a table and not a single name: goreleaser's default replacements differ
+// across templates (e.g. "amd64" vs "x86_64", "arm64" vs "aarch64"). The
+// upstream shipkit consumer (e.g. relay) does NOT control the asset names in
+// every release feed it might point to, so this matcher accepts the common
+// aliases out of the box. Custom layouts can be supported by extending this
+// table; no other code in this package needs to change.
+func archAliases(goarch string) []string {
+	switch goarch {
+	case "amd64":
+		return []string{"amd64", "x86_64", "x64"}
+	case "arm64":
+		return []string{"arm64", "aarch64"}
+	case "386":
+		return []string{"386", "i386", "x86"}
+	case "arm":
+		return []string{"arm", "armv6", "armv7"}
+	default:
+		return []string{goarch}
+	}
+}
+
+// osAliases returns the case-insensitive OS name variants goreleaser is known
+// to emit for a given Go OS. The matcher accepts ANY of the variants.
+func osAliases(goos string) []string {
+	switch goos {
+	case "darwin":
+		return []string{"darwin", "macos", "osx"}
+	case "linux":
+		return []string{"linux"}
+	case "windows":
+		return []string{"windows", "win"}
+	default:
+		return []string{goos}
+	}
+}
+
+// findAsset returns the asset in rel that targets the running host's
+// (GOOS, GOARCH) tuple. Matching is case-insensitive on the asset name and
+// accepts the common goreleaser aliases for OS and arch (see osAliases and
+// archAliases). The asset name must end in ".tar.gz" and must contain BOTH
+// an OS token and an arch token as standalone underscore-delimited segments
+// (e.g. "relay_0.1.1_darwin_arm64.tar.gz" matches darwin/arm64).
+//
+// Returns an error when no asset matches the host. This is intentionally
+// stricter than the previous "first .tar.gz wins" behavior: on a host where
+// the previous code would have downloaded the wrong arch's tarball and then
+// failed cosign verification with a confusing "bundle not found" message,
+// the new behavior surfaces the real cause ("no asset for darwin/arm64 in
+// release ...") before any download is attempted. See bug 1 from the
+// 2026-06-05 relay/v0.1.1 incident.
 func findAsset(rel ports.Release) (ports.Asset, error) {
+	goos := hostOS()
+	goarch := hostArch()
+	osNames := osAliases(goos)
+	archNames := archAliases(goarch)
+
 	for _, a := range rel.Assets {
-		if strings.HasSuffix(a.Name, ".tar.gz") {
+		if !strings.HasSuffix(strings.ToLower(a.Name), ".tar.gz") {
+			continue
+		}
+		if assetMatchesHost(a.Name, osNames, archNames) {
 			return a, nil
 		}
 	}
-	return ports.Asset{}, fmt.Errorf("no .tar.gz asset in release %s", rel.Tag)
+	return ports.Asset{}, fmt.Errorf("no .tar.gz asset matching %s/%s in release %s", goos, goarch, rel.Tag)
+}
+
+// assetMatchesHost returns true when name (case-insensitive) contains at
+// least one of osNames AND at least one of archNames as a token bounded by
+// underscores, dots, or hyphens. The boundary check prevents accidental
+// matches like "amd64" inside "myapp-amd64-extras.tar.gz" picking up a
+// linux arm64 asset; tokens must stand on their own.
+func assetMatchesHost(name string, osNames, archNames []string) bool {
+	lower := strings.ToLower(name)
+	hasOS := false
+	for _, n := range osNames {
+		if containsToken(lower, n) {
+			hasOS = true
+			break
+		}
+	}
+	if !hasOS {
+		return false
+	}
+	for _, a := range archNames {
+		if containsToken(lower, a) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsToken returns true if token appears in name bounded on both sides
+// by a separator (underscore, dot, or hyphen) or by the start/end of the
+// string. token must be lower-case; name is expected to be already lower-cased
+// by the caller.
+func containsToken(name, token string) bool {
+	if token == "" {
+		return false
+	}
+	for {
+		idx := strings.Index(name, token)
+		if idx < 0 {
+			return false
+		}
+		start := idx == 0 || isAssetSep(name[idx-1])
+		end := idx+len(token) == len(name) || isAssetSep(name[idx+len(token)])
+		if start && end {
+			return true
+		}
+		// Advance past this occurrence and keep searching.
+		name = name[idx+1:]
+	}
+}
+
+// isAssetSep returns true when c is a goreleaser-default separator between
+// tokens of an asset filename: underscore, hyphen, or dot.
+func isAssetSep(c byte) bool {
+	return c == '_' || c == '-' || c == '.'
 }
 
 // rollback executes the rollback cascade for a failure that occurred at failedAt.
@@ -626,6 +748,21 @@ func (o *Orchestrator) handleSnapshot(ctx context.Context) (State, error) {
 // handleDownload runs the StateDownloadBinary phase: prepare the temp directory,
 // open the destination file, stream the asset, and check ctx between download
 // and verify. Any failure here triggers rollback (snapshot already exists).
+//
+// When Cfg.SkipVerify is false, the companion cosign bundle is downloaded
+// alongside the tarball at the same temp path with a ".bundle" suffix. This
+// is the path StateVerifyCosign reads via Cosign.VerifyBundle (see
+// handleVerify), and the path SigstoreCosignAdapter.VerifyBundle stats before
+// invoking the cosign core. Bug 2 from the 2026-06-05 relay/v0.1.1 incident:
+// previously only the tarball was downloaded, causing cosign verify to fail
+// with "bundle not found at .../tmp/<name>.tar.gz.bundle: no such file or
+// directory" and a misleading rollback. The bundle URL is derived from the
+// tarball asset URL by appending ".bundle" so this works for any release feed
+// that follows the goreleaser+cosign convention (which is what shipkit's
+// release pipeline emits).
+//
+// SkipVerify=true preserves the legacy single-download path; the bundle is
+// not fetched because handleVerify will not consume it.
 func (o *Orchestrator) handleDownload(ctx context.Context) (State, error) {
 	currentState := StateDownloadBinary
 	o.callPreUpdate(currentState)
@@ -656,6 +793,23 @@ func (o *Orchestrator) handleDownload(ctx context.Context) (State, error) {
 		o.callPostUpdate(currentState)
 		return "", downloadErr
 	}
+
+	// Download the cosign bundle companion (B2 fix) when verification is on.
+	if !o.Cfg.SkipVerify {
+		bundlePath := tarPath + ".bundle"
+		bf, bOpenErr := openFn(bundlePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) //nolint:gosec
+		if bOpenErr != nil {
+			o.callPostUpdate(currentState)
+			return "", fmt.Errorf("open bundle file %s: %w", bundlePath, bOpenErr)
+		}
+		bDownloadErr := o.HTTP.DownloadAsset(ctx, o.asset.DownloadURL+".bundle", bf)
+		_ = bf.Close()
+		if bDownloadErr != nil {
+			o.callPostUpdate(currentState)
+			return "", fmt.Errorf("download bundle %s: %w", o.asset.Name+".bundle", bDownloadErr)
+		}
+	}
+
 	o.tmpDir = tmpDir
 	o.tarPath = tarPath
 	o.callPostUpdate(currentState)

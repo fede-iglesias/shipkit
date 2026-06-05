@@ -41,6 +41,11 @@ type RealFsAdapter struct {
 	WriteFileFn func(string, []byte, os.FileMode) error
 	// CopyFn copies between writer and reader. Defaults to io.Copy.
 	CopyFn func(io.Writer, io.Reader) (int64, error)
+	// ChmodFn changes the mode of a file. Defaults to os.Chmod. Used by
+	// Restore (B5 fix) to re-apply the snapshot's original mode bits after
+	// the temp-rename swap, because os.Create produces 0o666-pre-umask
+	// (typically 0o644) and would otherwise drop the executable bit.
+	ChmodFn func(string, os.FileMode) error
 }
 
 // randReader is the source of randomness for defaultRandHex. Tests may swap it.
@@ -70,6 +75,7 @@ func NewRealFs() *RealFsAdapter {
 		ReadFileFn:  os.ReadFile,
 		WriteFileFn: os.WriteFile,
 		CopyFn:      io.Copy,
+		ChmodFn:     os.Chmod,
 	}
 }
 
@@ -113,6 +119,17 @@ func (a *RealFsAdapter) Snapshot(ctx context.Context, src, snapshotDir string) (
 
 // Restore copies snapshotDir/<snapshotID>/<basename of dst> back to dst atomically
 // (write to temp file in same directory, then rename).
+//
+// After the rename the snapshot's original mode bits are re-applied via
+// ChmodFn (B5 fix). Without this, the rollback path silently drops the
+// executable bit because os.Create defaults to mode 0o666 pre-umask
+// (typically 0o644 on macOS/Linux): a binary that started as 0o755 would
+// come back as 0o644 after a rolled-back failed update, leaving the user
+// with a non-executable file on disk and a misleading "rolled-back ok"
+// status. When Stat fails or the snapshot's mode lacks any execute bit,
+// the restore falls back to 0o755 because that is the only sensible mode
+// for a shipkit-managed CLI binary; surfacing the Chmod error to the caller
+// would be worse than the silent permission downgrade we just fixed.
 func (a *RealFsAdapter) Restore(ctx context.Context, snapshotID, dst string) error {
 	// snapshotID is the full path of the snapshot subdirectory returned by Snapshot.
 	// The convention is that snapshotID encodes snapshotDir so Restore can locate
@@ -121,6 +138,16 @@ func (a *RealFsAdapter) Restore(ctx context.Context, snapshotID, dst string) err
 
 	baseName := filepath.Base(dst)
 	snapFile := filepath.Join(snapSubdir, baseName)
+
+	// Capture the snapshot's mode bits BEFORE opening for read so we can
+	// re-apply them after the swap. Failure to stat is non-fatal: we fall
+	// back to 0o755 below.
+	var snapMode os.FileMode
+	if a.StatFn != nil {
+		if fi, statErr := a.StatFn(snapFile); statErr == nil {
+			snapMode = fi.Mode().Perm()
+		}
+	}
 
 	srcFile, err := a.OpenFn(snapFile)
 	if err != nil {
@@ -155,6 +182,20 @@ func (a *RealFsAdapter) Restore(ctx context.Context, snapshotID, dst string) err
 	if err := a.RenameFn(tmpPath, dst); err != nil {
 		a.RemoveFn(tmpPath) //nolint:errcheck
 		return fmt.Errorf("restore: rename %s -> %s: %w", tmpPath, dst, err)
+	}
+
+	// Re-apply executable bits. If the snapshot stat failed earlier or
+	// returned a mode with no execute bit set, fall back to 0o755 because a
+	// shipkit-managed binary must remain executable after rollback.
+	if snapMode&0o111 == 0 {
+		snapMode = 0o755
+	}
+	chmodFn := a.ChmodFn
+	if chmodFn == nil {
+		chmodFn = os.Chmod
+	}
+	if err := chmodFn(dst, snapMode); err != nil {
+		return fmt.Errorf("restore: chmod %s: %w", dst, err)
 	}
 
 	return nil

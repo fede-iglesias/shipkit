@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.2.2] - 2026-06-05
+
+### Fixed
+
+- B5: `findAsset` now selects the release asset matching the running host's
+  (`runtime.GOOS`, `runtime.GOARCH`) tuple instead of returning the first
+  `.tar.gz` in the asset list. The matcher accepts case-insensitive aliases
+  for OS (`darwin`/`macos`/`osx`, `windows`/`win`) and arch (`amd64`/`x86_64`,
+  `arm64`/`aarch64`, etc.) and rejects companion files (`.bundle`,
+  `.sbom.json`) even when their names contain the host tokens. Reproduced
+  against the live `fede-iglesias/tools` `relay-v0.1.1` release: previously a
+  darwin/arm64 host downloaded `relay_0.1.1_darwin_amd64.tar.gz` and failed
+  cosign verify with a confusing "bundle not found" message; the new matcher
+  returns `relay_0.1.1_darwin_arm64.tar.gz` and surfaces a clear
+  "no .tar.gz asset matching <os>/<arch>" error if no asset matches.
+- B6: `handleDownload` now fetches the cosign `.bundle` companion alongside
+  the tarball when `Cfg.SkipVerify=false`. Previously only the tarball was
+  downloaded, causing `Cosign.VerifyBundle` to fail with
+  `cosign: bundle not found at "<tmpdir>/<asset>.tar.gz.bundle": no such file
+  or directory`. The bundle URL is the tarball's `DownloadURL` with `.bundle`
+  appended (goreleaser + cosign convention). `SkipVerify=true` preserves the
+  legacy single-download fast path.
+- B7: `RealFsAdapter.Restore` now re-applies the snapshot's mode bits via
+  `Chmod` after the temp-rename swap. Previously `os.Create` produced a
+  `0o666`-pre-umask file (typically `0o644` on macOS/Linux) and the rename
+  inherited the temp file's mode, silently dropping the executable bit on
+  rollback: a `0o755` binary came back as `0o644` and the user observed
+  `permission denied` on the next invocation. When the snapshot has no
+  execute bit (corrupt snapshot edge case), Restore falls back to `0o755`
+  because a shipkit-managed CLI binary must remain executable.
+
+### Added
+
+- `hostOS`, `hostArch` package-level variables and `assetMatchesHost`,
+  `containsToken` helpers in `orchestrator.go`. Tests use a `TestMain` plus
+  `setHostForTest(t, goos, goarch)` to exercise the matcher under multiple
+  simulated hosts without depending on the test runner's actual arch.
+- `RealFsAdapter.ChmodFn` field (defaults to `os.Chmod` via `NewRealFs`).
+  Used by `Restore` for B7; injectable for failure-path testing.
+
 ## [0.2.1] - 2026-06-05
 
 ### Fixed

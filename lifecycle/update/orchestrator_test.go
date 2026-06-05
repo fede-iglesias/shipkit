@@ -17,6 +17,41 @@ import (
 )
 
 // ---------------------------------------------------------------------------
+// TestMain: stable host (OS, arch) for asset matching tests
+// ---------------------------------------------------------------------------
+//
+// findAsset filters release assets by the runtime's (GOOS, GOARCH). The
+// existing fixture corpus in this file uses "myapp_linux_amd64.tar.gz" as the
+// canonical asset name, so the test process pretends to be linux/amd64 by
+// default. Tests that exercise the matcher itself (TestFindAsset_*) override
+// these via setHostForTest below.
+func TestMain(m *testing.M) {
+	prevOS := hostOS
+	prevArch := hostArch
+	hostOS = func() string { return "linux" }
+	hostArch = func() string { return "amd64" }
+	code := m.Run()
+	hostOS = prevOS
+	hostArch = prevArch
+	os.Exit(code)
+}
+
+// setHostForTest swaps hostOS/hostArch to the given values for the duration
+// of the test. The previous values are restored via t.Cleanup so subsequent
+// tests inherit the TestMain defaults.
+func setHostForTest(t *testing.T, goos, goarch string) {
+	t.Helper()
+	prevOS := hostOS
+	prevArch := hostArch
+	hostOS = func() string { return goos }
+	hostArch = func() string { return goarch }
+	t.Cleanup(func() {
+		hostOS = prevOS
+		hostArch = prevArch
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Mock implementations
 // ---------------------------------------------------------------------------
 

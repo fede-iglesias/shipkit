@@ -79,6 +79,9 @@ func TestNewRealFs_DefaultsWired(t *testing.T) {
 	if a.CopyFn == nil {
 		t.Error("CopyFn must be non-nil")
 	}
+	if a.ChmodFn == nil {
+		t.Error("ChmodFn must be non-nil (B7 fix: required to re-apply executable bit after Restore)")
+	}
 }
 
 // --- Snapshot tests ---
