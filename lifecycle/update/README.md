@@ -22,9 +22,10 @@ import (
     "github.com/fede-iglesias/shipkit/lifecycle/update/adapters"
 )
 
-// In cmd/myapp/main.go or init:
-adapters.SetVerifyCore(sigstoreRealVerify) // wire from cmd layer
-update.SetOrchestratorFactory(update.NewOrchestratorFactory())
+// In cmd/myapp/main.go:
+cos := adapters.NewSigstoreCosign()
+cos.CertIdentityRegex = `https://github\.com/owner/myapp/.*`
+cos.OIDCIssuer = "https://token.actions.githubusercontent.com"
 
 cfg := update.Config{
     Repo:               "owner/myapp",
@@ -40,9 +41,12 @@ result, err := update.Run(ctx, cfg, update.RunOpts{})
 
 ## sigstore wiring
 
-`sigstoreRealVerify` (TUF + Rekor network calls) must live in the consumer cmd
-layer. The adapter returns `ErrCosignNotConfigured` until `SetVerifyCore` is
-called. See `adapters/cosign_sigstore.go`.
+As of v0.2.4 `NewSigstoreCosign` wires the real sigstore-go verifier (TUF +
+Rekor) as the default. Consumers only need to set `CertIdentityRegex` and
+`OIDCIssuer` for their repo; no `SetVerifyCore` call is required for the
+adapter to function. `SetVerifyCore` is still exported so tests can inject a
+stub that avoids network calls. See `adapters/cosign_sigstore.go` and
+`adapters/cosign_sigstore_real.go`.
 
 ## Ports
 

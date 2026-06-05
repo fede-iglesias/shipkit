@@ -1,5 +1,63 @@
 # Changelog
 
+## [0.2.4] - 2026-06-05
+
+### Fixed
+
+- B8: `NewSigstoreCosign` now wires the real sigstore-go TUF + Rekor verifier
+  (`sigstoreRealVerify`) as the default `verifyCore`. Before v0.2.4 the
+  default was a stub that returned `ErrCosignNotConfigured` and the consumer
+  cmd layer had to call `SetVerifyCore` with its own
+  `sigstoreRealVerify` reimplementation; consumers that imported the adapter
+  without that wiring failed at runtime with
+  `cosign: verifyCore not configured, set via SetVerifyCore` during the
+  verify phase of the update flow. Reproduced against relay v0.1.2 -> v0.1.3
+  on macOS arm64: the orchestrator picked the correct asset (B5), downloaded
+  the cosign bundle companion (B6), then bailed with `verifyCore not
+  configured` because relay had never called `SetVerifyCore`. The fix
+  promotes `sigstoreRealVerify` from `example/shipkit-example` into
+  `adapters/cosign_sigstore_real.go` and makes it the package default so
+  `import "github.com/fede-iglesias/shipkit/lifecycle/update/adapters"`
+  followed by `NewSigstoreCosign()` produces a working production adapter
+  out-of-the-box. Consumers only need to set `CertIdentityRegex` and
+  `OIDCIssuer` for their repo; no `SetVerifyCore` call is required.
+
+### Changed
+
+- `SetVerifyCore(nil)` now restores the legacy `ErrCosignNotConfigured`
+  sentinel for back-compat coverage. Callers that previously relied on the
+  "not configured" default can opt into that branch explicitly. The
+  `sigstoreVerifyFunc` type and `SetVerifyCore` signature are unchanged; the
+  injection seam is preserved for tests that need to avoid TUF + Rekor
+  network calls.
+
+### Added
+
+- Regression test `TestVerifyBundle_DefaultNeverReturnsNotConfigured`
+  reproduces the relay v0.1.2 -> v0.1.3 failure mode: construct an adapter
+  via `NewSigstoreCosign` without calling `SetVerifyCore`, invoke
+  `VerifyBundle` against a real downloaded blob plus a malformed bundle, and
+  assert the returned error is from the sigstore-go verifier rather than
+  `ErrCosignNotConfigured`. Offline (no TUF / Rekor network reach) because
+  the bundle parser rejects the fixture before any network call.
+- Identity-check test `TestNewSigstoreCosign_DefaultIsRealVerifier` pins the
+  default `verifyCore` to `sigstoreRealVerify` via function pointer equality
+  so a future refactor that swaps the default is caught at unit-test time.
+- Coverage-completion test `TestSetVerifyCore_NilRestoresErrNotConfigured`
+  exercises the new `SetVerifyCore(nil)` branch.
+
+### Sigstore deps (new transitives)
+
+- `github.com/sigstore/sigstore-go v1.2.0`
+- Transitive: `sigstore`, `protobuf-specs`, `rekor`, `rekor-tiles`,
+  `timestamp-authority`, `theupdateframework/go-tuf/v2`, `in-toto`,
+  `transparency-dev/{formats,merkle}`, `digitorus/{pkcs7,timestamp}`,
+  `go-openapi/*`, `opentelemetry/*`, `google.golang.org/{genproto,grpc,protobuf}`,
+  `k8s.io/klog/v2`. Required for the embedded `sigstoreRealVerify`. The
+  `embedded sigstore-go` design was documented in the package's
+  `doc.go` since v0.2.0; v0.2.4 ships the actual implementation that
+  the docs always promised.
+
 ## [0.2.3] - 2026-06-05
 
 ### Added

@@ -11,10 +11,12 @@
 // as a port interface. Concrete adapters live in the adapters sub-package.
 //
 // The cosign verification adapter uses sigstore-go embedded (no os/exec cosign
-// binary). Production wiring for the real TUF+Rekor network path must be
-// injected at the consumer cmd layer via [adapters.SigstoreCosignAdapter.SetVerifyCore].
-// Without that wiring, [adapters.SigstoreCosignAdapter.VerifyBundle] returns
-// [adapters.ErrCosignNotConfigured].
+// binary). As of v0.2.4, [adapters.NewSigstoreCosign] wires the real TUF+Rekor
+// verifier as the default; consumers no longer need to call
+// [adapters.SigstoreCosignAdapter.SetVerifyCore] to make the adapter work in
+// production. SetVerifyCore is still exported for tests and advanced consumers
+// that want to plug in a custom verifier; passing nil restores the legacy
+// [adapters.ErrCosignNotConfigured] sentinel for back-compat coverage.
 //
 // # Usage
 //

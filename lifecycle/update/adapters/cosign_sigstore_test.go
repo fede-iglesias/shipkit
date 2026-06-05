@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -35,6 +36,60 @@ func TestNewSigstoreCosign_DefaultsCorrect(t *testing.T) {
 	// verifyCore must be set to the real implementation (non-nil) by default.
 	if a.verifyCore == nil {
 		t.Error("verifyCore must be non-nil after NewSigstoreCosign")
+	}
+}
+
+// TestNewSigstoreCosign_DefaultIsRealVerifier asserts the production wiring
+// contract introduced in v0.2.4: NewSigstoreCosign wires sigstoreRealVerify as
+// the default verifyCore so consumers no longer need to call SetVerifyCore for
+// the adapter to function. Validating identity of the function value (rather
+// than its behavior) keeps the test offline; sigstoreRealVerify itself makes
+// TUF + Rekor network calls and is exercised at integration time.
+//
+// This is the regression guard for the "cosign: verifyCore not configured, set
+// via SetVerifyCore" runtime error reported by relay v0.1.2 -> v0.1.3 against
+// shipkit/lifecycle/update v0.2.3.
+func TestNewSigstoreCosign_DefaultIsRealVerifier(t *testing.T) {
+	a := NewSigstoreCosign()
+	// Bridge sigstoreVerifyFunc to a comparable value via the same signature.
+	wantPtr := reflect.ValueOf(sigstoreRealVerify).Pointer()
+	gotPtr := reflect.ValueOf(a.verifyCore).Pointer()
+	if gotPtr != wantPtr {
+		t.Fatalf("default verifyCore must be sigstoreRealVerify; got pointer %x, want %x", gotPtr, wantPtr)
+	}
+}
+
+// TestVerifyBundle_DefaultNeverReturnsNotConfigured is the behavioural
+// regression guard for the v0.1.2 -> v0.1.3 relay incident: the consumer
+// imported lifecycle/update/adapters, constructed SigstoreCosignAdapter
+// through NewSigstoreCosign, and called VerifyBundle on a real downloaded
+// asset. Before v0.2.4 this returned ErrCosignNotConfigured because the
+// default verifyCore was a stub. After v0.2.4 the default is the real
+// verifier; VerifyBundle may still fail (the test fixture is a malformed
+// bundle) but the failure must be a sigstore-level error, NOT
+// ErrCosignNotConfigured.
+//
+// We use a malformed bundle so the test is offline (no TUF / Rekor reach):
+// sigstoreRealVerify bails at bundle.LoadJSONFromPath long before any
+// network call. The assertion is "did NOT return the not-configured
+// sentinel"; the specific sigstore parse error is intentionally not pinned
+// to avoid coupling the test to a vendored library version.
+func TestVerifyBundle_DefaultNeverReturnsNotConfigured(t *testing.T) {
+	blob := writeTempFile(t, "release.tar.gz", "fake-blob-content")
+	// Empty JSON body is structurally invalid as a sigstore bundle; the real
+	// verifier rejects it during LoadJSONFromPath, before any network call.
+	bundlePath := writeTempFile(t, "release.bundle", "{}")
+
+	a := NewSigstoreCosign()
+	a.CertIdentityRegex = `https://github\.com/fede-iglesias/shipkit/.*`
+	a.OIDCIssuer = "https://token.actions.githubusercontent.com"
+
+	err := a.VerifyBundle(context.Background(), blob, bundlePath)
+	if err == nil {
+		t.Fatal("expected an error from sigstoreRealVerify against a malformed bundle, got nil")
+	}
+	if errors.Is(err, ErrCosignNotConfigured) {
+		t.Fatalf("v0.2.4 regression: default verifyCore must not return ErrCosignNotConfigured, got %v", err)
 	}
 }
 
@@ -163,16 +218,19 @@ func TestVerifyBundle_VerifyCorePath(t *testing.T) {
 	}
 }
 
-// TestVerifyBundle_DefaultVerifyCoreReturnsErrNotConfigured exercises the path
-// where VerifyFn is nil and verifyCore is the package-level defaultVerifyCore,
-// which signals that production wiring (SetVerifyCore with sigstoreRealVerify)
-// has not been done. Covers defaultVerifyCore so the adapters package can hit
-// 100% statement coverage without exercising the real sigstore-go path.
-func TestVerifyBundle_DefaultVerifyCoreReturnsErrNotConfigured(t *testing.T) {
+// TestSetVerifyCore_NilRestoresErrNotConfigured exercises the back-compat
+// branch where passing nil to SetVerifyCore restores the legacy
+// "not configured" sentinel. This covers errNotConfiguredVerifyCore so the
+// adapters package keeps 100% statement coverage without exercising the real
+// sigstore-go path. Before v0.2.4 this was the package default; after v0.2.4
+// it is an explicit opt-in for callers that want to observe an unwired core.
+func TestSetVerifyCore_NilRestoresErrNotConfigured(t *testing.T) {
 	blob := writeTempFile(t, "release.tar.gz", "content")
 	bundlePath := writeTempFile(t, "release.bundle", "{}")
 
 	a := NewSigstoreCosign()
+	a.SetVerifyCore(nil)
+
 	err := a.VerifyBundle(context.Background(), blob, bundlePath)
 	if !errors.Is(err, ErrCosignNotConfigured) {
 		t.Fatalf("expected ErrCosignNotConfigured, got %v", err)

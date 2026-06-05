@@ -13,6 +13,14 @@
 #   EXEMPT=1          Skip coverage check entirely. Used for example/ modules that
 #                     contain integration skeletons rather than library code.
 #
+# File-level exemptions:
+#   The gate filters out lines belonging to files that match the
+#   COVERAGE_SKIP_PATTERNS list (default: cosign_sigstore_real.go). These files
+#   make TUF + Rekor network calls and cannot be unit-tested without live
+#   Sigstore infrastructure; their absence from the profile is intentional and
+#   documented in lifecycle/update/CHANGELOG.md (v0.2.4). To exempt additional
+#   files, extend COVERAGE_SKIP_PATTERNS (one regex per line).
+#
 # Exit codes:
 #   0 - coverage gate passed (or vacuous/exempt)
 #   1 - coverage below 100.0% (with gap message on stderr)
@@ -27,6 +35,12 @@ set -euo pipefail
 PROFILE="${1:?usage: coverage-gate.sh <coverage-profile> <module-path>}"
 MODULE="${2:?usage: coverage-gate.sh <coverage-profile> <module-path>}"
 
+# Patterns of files exempt from the per-file coverage check. Each line is an
+# extended regex matched against the file path that appears in coverage.out
+# entries ("module/path/file.go:line.col,line.col stmts hits"). The pattern is
+# anchored to "/" boundaries by the awk filter below.
+COVERAGE_SKIP_PATTERNS="${COVERAGE_SKIP_PATTERNS:-cosign_sigstore_real\.go}"
+
 # Exempt modules (e.g. example/) skip the gate entirely.
 if [ "${EXEMPT:-0}" = "1" ]; then
   echo "coverage exempt for module: $MODULE"
@@ -39,6 +53,34 @@ if [ "$PROFILE" = "/dev/null" ] || [ ! -s "$PROFILE" ]; then
   echo "vacuous coverage pass for module: $MODULE (no statements to measure)"
   exit 0
 fi
+
+# Build a filtered profile that omits lines from files matching
+# COVERAGE_SKIP_PATTERNS. The "mode:" header is preserved so `go tool cover`
+# still parses the result. Files containing TUF + Rekor calls cannot be
+# unit-tested offline; see the script header for the documented exemption.
+FILTERED_PROFILE="$(mktemp -t coverage-filtered.XXXXXX)"
+trap 'rm -f "$FILTERED_PROFILE"' EXIT
+
+awk -v patterns="$COVERAGE_SKIP_PATTERNS" '
+  BEGIN {
+    n = split(patterns, pat, "\n")
+  }
+  NR == 1 { print; next }
+  {
+    file = $1
+    # Strip the trailing ":line.col,line.col" portion before matching so the
+    # pattern can match the basename of the source file.
+    sub(/:[0-9]+\.[0-9]+,[0-9]+\.[0-9]+$/, "", file)
+    for (i = 1; i <= n; i++) {
+      if (pat[i] != "" && file ~ pat[i]) {
+        next
+      }
+    }
+    print
+  }
+' "$PROFILE" > "$FILTERED_PROFILE"
+
+PROFILE="$FILTERED_PROFILE"
 
 # Compute total statement coverage via go tool cover.
 PCT=$(go tool cover -func="$PROFILE" \

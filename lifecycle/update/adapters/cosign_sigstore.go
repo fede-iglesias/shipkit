@@ -15,28 +15,32 @@ import (
 // Compile-time check: SigstoreCosignAdapter must satisfy CosignPort.
 var _ ports.CosignPort = (*SigstoreCosignAdapter)(nil)
 
-// ErrCosignNotConfigured is returned by VerifyBundle when no production verify
-// implementation has been wired. Startup code in the consumer cmd layer must call
-// SetVerifyCore with sigstoreRealVerify before the adapter is used.
+// ErrCosignNotConfigured is retained for backward compatibility. As of v0.2.4
+// NewSigstoreCosign wires the real sigstore-go verifier as the default, so
+// VerifyBundle no longer returns this error unless the caller explicitly
+// disables verifyCore via SetVerifyCore(nil) or replaces it with a stub that
+// returns it.
 var ErrCosignNotConfigured = errors.New("cosign: verifyCore not configured, set via SetVerifyCore")
 
 // sigstoreVerifyFunc is the type for the injectable verify function. The
-// production implementation lives in the consumer cmd layer (e.g. cmd/myapp/update_sigstore.go)
-// because it performs TUF + Rekor network calls and cannot be unit-tested
-// without an integration setup.
+// default implementation (sigstoreRealVerify in cosign_sigstore_real.go) makes
+// TUF + Rekor network calls and is exercised at integration time. Tests inject
+// a stub via SetVerifyCore.
 type sigstoreVerifyFunc func(ctx context.Context, oidcIssuer, certIdentityRegex, blobPath, bundlePath string) error
 
-// defaultVerifyCore is the placeholder used until SetVerifyCore wires a real
-// implementation. Returning ErrCosignNotConfigured keeps the not-wired path
-// covered by unit tests while production wiring lives in the cmd layer.
-func defaultVerifyCore(_ context.Context, _, _, _, _ string) error {
+// errNotConfiguredVerifyCore is a no-op verifyCore that always returns
+// ErrCosignNotConfigured. Used only when callers explicitly pass nil to
+// SetVerifyCore, preserving the historical "not configured" sentinel for
+// tests that exercise that branch.
+func errNotConfiguredVerifyCore(_ context.Context, _, _, _, _ string) error {
 	return ErrCosignNotConfigured
 }
 
 // SigstoreCosignAdapter implements ports.CosignPort with a configurable verify
-// function. The real sigstore-go verification (TUF-backed) is injected at
-// startup via SetVerifyCore; without that wiring VerifyBundle returns
-// ErrCosignNotConfigured.
+// function. As of v0.2.4 NewSigstoreCosign wires sigstoreRealVerify (real
+// sigstore-go TUF + Rekor verification) as the default so the adapter works
+// out-of-the-box without consumer wiring. Tests override the default via
+// SetVerifyCore.
 //
 // VerifyFn is a high-level mock for tests that want to bypass the verify-core
 // indirection entirely. Production code leaves it nil.
@@ -55,25 +59,41 @@ type SigstoreCosignAdapter struct {
 	VerifyFn func(ctx context.Context, blobPath, bundlePath string) error
 
 	// verifyCore is the low-level verify implementation. Defaults to
-	// defaultVerifyCore (returns ErrCosignNotConfigured). Production startup
-	// calls SetVerifyCore with sigstoreRealVerify.
+	// sigstoreRealVerify (real TUF + Rekor verification). Tests override via
+	// SetVerifyCore; passing nil to SetVerifyCore restores the legacy
+	// "not configured" sentinel for back-compat coverage of that branch.
 	verifyCore sigstoreVerifyFunc
 }
 
 // NewSigstoreCosign returns a SigstoreCosignAdapter with empty policy fields
-// and verifyCore set to defaultVerifyCore. The caller must set CertIdentityRegex
-// and OIDCIssuer for their repo, then call SetVerifyCore with the real verify
-// implementation from the consumer cmd layer.
+// and verifyCore set to the real sigstore-go verifier (sigstoreRealVerify).
+// The caller must still set CertIdentityRegex and OIDCIssuer for their repo;
+// without those the verifier will reject every bundle because the certificate
+// identity will not match.
+//
+// As of v0.2.4 the consumer no longer needs to call SetVerifyCore for the
+// adapter to function in production; the default is the real TUF-backed
+// implementation. SetVerifyCore is retained for tests and for advanced
+// consumers that want to plug in a custom verifier.
 func NewSigstoreCosign() *SigstoreCosignAdapter {
 	return &SigstoreCosignAdapter{
-		verifyCore: defaultVerifyCore,
+		verifyCore: sigstoreRealVerify,
 	}
 }
 
-// SetVerifyCore wires a real verify implementation into the adapter. Production
-// startup must call this with sigstoreRealVerify (from the consumer cmd layer);
-// otherwise VerifyBundle returns ErrCosignNotConfigured.
+// SetVerifyCore replaces the low-level verify implementation. Tests inject a
+// stub here to avoid real TUF + Rekor network calls. Passing nil restores the
+// legacy "not configured" sentinel: VerifyBundle returns ErrCosignNotConfigured
+// in that case so callers can observe an unwired core if they explicitly opted
+// in to that behavior.
+//
+// Production code typically does NOT need to call this; NewSigstoreCosign
+// already wires sigstoreRealVerify as the default.
 func (a *SigstoreCosignAdapter) SetVerifyCore(fn sigstoreVerifyFunc) {
+	if fn == nil {
+		a.verifyCore = errNotConfiguredVerifyCore
+		return
+	}
 	a.verifyCore = fn
 }
 
@@ -85,7 +105,7 @@ func (a *SigstoreCosignAdapter) SetVerifyCore(fn sigstoreVerifyFunc) {
 //   - ctx is already cancelled
 //   - blobPath or bundlePath do not exist or are not readable
 //   - the bundle is invalid or the identity policy does not match
-//   - the verifyCore has not been wired (ErrCosignNotConfigured)
+//   - verifyCore has been disabled via SetVerifyCore(nil) (ErrCosignNotConfigured)
 func (a *SigstoreCosignAdapter) VerifyBundle(ctx context.Context, blobPath, bundlePath string) error {
 	select {
 	case <-ctx.Done():
