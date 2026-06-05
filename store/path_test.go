@@ -191,6 +191,7 @@ func TestKindFromPath(t *testing.T) {
 		{"knowledge/research/flink-vs-kafka.md", "research", false},
 		{"knowledge/reports/perf-2026-q1.md", "report", false},
 		{"knowledge/incidents/db-outage-june.md", "incident", false},
+		{"knowledge/policies/git/branch-naming.md", "policy-git", false},
 		{"some/unknown/path.md", "", true},
 	}
 
