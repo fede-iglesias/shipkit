@@ -117,6 +117,58 @@ func (a *GitHubHTTPAdapter) LatestRelease(ctx context.Context, repo, tagPrefix s
 	}, nil
 }
 
+// GetReleaseByTag queries GET /repos/{repo}/releases/tags/{tag} anonymously
+// and returns the matching release. Used by the update orchestrator when the
+// caller pins a target version via opts.Version so the asset list returned is
+// the pinned release's, not the latest's (B3 fix).
+//
+// A 404 response is converted into an error whose message contains the literal
+// substring "not found", so the orchestrator can surface a stable Result.Reason
+// for KindFailedUnrecoverable without parsing nested error chains.
+func (a *GitHubHTTPAdapter) GetReleaseByTag(ctx context.Context, repo, tag string) (ports.Release, error) {
+	url := fmt.Sprintf("%s/repos/%s/releases/tags/%s", a.BaseURL, repo, tag)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return ports.Release{}, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("User-Agent", a.UserAgent)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := a.Client.Do(req)
+	if err != nil {
+		return ports.Release{}, fmt.Errorf("do request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return ports.Release{}, fmt.Errorf("release %q not found in %s", tag, repo)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return ports.Release{}, fmt.Errorf("GitHub API returned status %d for %s", resp.StatusCode, url)
+	}
+
+	var rel ghRelease
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return ports.Release{}, fmt.Errorf("decode response: %w", err)
+	}
+
+	assets := make([]ports.Asset, len(rel.Assets))
+	for i, ast := range rel.Assets {
+		assets[i] = ports.Asset{
+			Name:        ast.Name,
+			DownloadURL: ast.BrowserDownloadURL,
+			Size:        ast.Size,
+		}
+	}
+
+	return ports.Release{
+		Tag:         rel.TagName,
+		PublishedAt: rel.PublishedAt,
+		Assets:      assets,
+	}, nil
+}
+
 // DownloadAsset streams the asset at url to w using chunked I/O so the full
 // body is never buffered in memory. Context cancellation is propagated through
 // the request lifecycle.

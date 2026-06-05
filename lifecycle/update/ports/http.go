@@ -39,6 +39,19 @@ type HTTPPort interface {
 	// Returns an error if no matching release is found or the request fails.
 	LatestRelease(ctx context.Context, repo, tagPrefix string) (Release, error)
 
+	// GetReleaseByTag retrieves a specific release by its exact tag name
+	// (e.g. "myapp-v0.4.0", including the TagPrefix). Used by the orchestrator
+	// when opts.Version pins a target version so the asset list returned is
+	// the pinned release's, not the latest's. This fixes B3: when SkipVerify is
+	// set with a pinned target version, the previous implementation queried
+	// LatestRelease and silently installed the latest asset.
+	//
+	// Returns an error wrapping a "release not found" sentinel when the tag
+	// does not exist in the repo. Implementations should produce errors whose
+	// .Error() contains the literal substring "not found" so callers can
+	// surface a stable Result.Reason without parsing nested error chains.
+	GetReleaseByTag(ctx context.Context, repo, tag string) (Release, error)
+
 	// DownloadAsset streams the asset at url to w. The implementation must
 	// propagate ctx cancellation and must not buffer the full body in memory.
 	DownloadAsset(ctx context.Context, url string, w io.Writer) error

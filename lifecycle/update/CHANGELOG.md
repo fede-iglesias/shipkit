@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.2.1] - 2026-06-05
+
+### Fixed
+
+- B1+B4: `Result.From` is now populated from new `Config.CurrentVersion` field
+  across every terminal Kind (KindCheckOnly, KindDryRun, KindOK, KindNoOp,
+  KindRolledBack, KindFailedUnrecoverable). Callers that previously relied on
+  the legacy blank `From` keep working: an empty `Config.CurrentVersion`
+  preserves the old behavior.
+- B2: `Orchestrator.rollback` is now nil-safe across `Clock`, `Manifest`,
+  `Steps`, and inner Step pointers. `Run` short-circuits to
+  `KindFailedUnrecoverable` when the failure happens before any snapshot
+  state exists, instead of invoking rollback against an empty manifest and
+  panicking on a nil dereference.
+- B3: `--target-version` is now honored even when `--skip-verify` is set.
+  Previously `resolveTargetVersion` queried `LatestRelease` regardless of
+  `opts.Version`, causing the downstream asset download to install the
+  latest release silently. Now the new `HTTPPort.GetReleaseByTag` is
+  invoked when `opts.Version` is pinned, and a missing tag surfaces as
+  `KindFailedUnrecoverable` with `Reason` containing
+  `release v<X.Y.Z> not found in <repo>`.
+
+### Added
+
+- `Config.CurrentVersion string` field (json:"current_version,omitempty")
+  declared by callers (e.g. `kt` via `version.Version`). Optional but
+  required to populate `Result.From`.
+- `HTTPPort.GetReleaseByTag(ctx, repo, tag) (Release, error)` method.
+  `GitHubHTTPAdapter` implementation uses
+  `GET /repos/{repo}/releases/tags/{tag}` (GitHub REST API anonymous lookup).
+
 ## [0.2.0] - 2026-06-04
 
 ### Fixed

@@ -6,11 +6,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/fede-iglesias/shipkit/lifecycle/migrations"
 	"github.com/fede-iglesias/shipkit/lifecycle/recovery"
 	"github.com/fede-iglesias/shipkit/lifecycle/update/ports"
 )
+
+// realClock is the default wall-clock implementation used by NewOrchestrator
+// when the caller does not inject a ClockPort. It exists so that production
+// callers (e.g. consumer cmd layers) do not need to wire a Clock just to avoid
+// a nil-pointer dereference inside rollback's manifest construction.
+type realClock struct{}
+
+// NowUTC returns the current time in UTC.
+func (realClock) NowUTC() time.Time { return time.Now().UTC() }
+
+// Since returns the duration elapsed since t.
+func (realClock) Since(t time.Time) time.Duration { return time.Since(t) }
 
 // Hooks contains optional lifecycle callbacks for the orchestrator.
 // Any nil hook is silently skipped.
@@ -92,6 +105,7 @@ type Orchestrator struct {
 func NewOrchestrator(cfg Config) *Orchestrator {
 	o := &Orchestrator{
 		Cfg:      cfg,
+		Clock:    realClock{},
 		Migrator: migrations.New(),
 		mkdirAll: os.MkdirAll,
 		openFile: os.OpenFile,
@@ -170,19 +184,56 @@ func (o *Orchestrator) callOnRollback(from State, cause error) {
 	}
 }
 
-// resolveTargetVersion returns the version string (without TagPrefix) to update to.
-// If opts.Version is set, it is returned directly. Otherwise the latest release
-// is queried and the tag is stripped of the prefix.
-func (o *Orchestrator) resolveTargetVersion(ctx context.Context, opts RunOpts) (string, ports.Release, error) {
-	rel, err := o.HTTP.LatestRelease(ctx, o.Cfg.Repo, o.Cfg.TagPrefix)
+// resolveTargetVersion returns the version string (without TagPrefix) to update
+// to, the release whose assets should be downloaded, and the latest release
+// (always queried for downgrade detection + NoOp short-circuits).
+//
+// Behavior:
+//   - opts.Version == "":         install the latest release. rel == latest.
+//   - opts.Version != "":         install the pinned release. rel is fetched
+//                                 via GetReleaseByTag(o.Cfg.TagPrefix+v) so the
+//                                 returned asset list belongs to the pinned
+//                                 release, not the latest's.
+//
+// Invariant: the returned version string never includes the configured
+// TagPrefix. Callers compare against o.Cfg.CurrentVersion (also expected to
+// be prefix-free) via isSameVersion which itself tolerates a leading "v".
+//
+// Fix for B3 ("target-version ignored when skipVerify"): when opts.Version
+// is set, GetReleaseByTag is invoked to ensure the asset download uses the
+// pinned release's assets (not the latest's). Previously LatestRelease was
+// queried even when a version was pinned, and the asset list returned was
+// from latest, leading to silent latest-install when skipVerify was set.
+//
+// Returns a wrapped error whose .Error() contains "not found" when the pinned
+// tag does not resolve to a release in the repo. The orchestrator's dispatch
+// loop surfaces this through Result.Reason at KindFailedUnrecoverable.
+func (o *Orchestrator) resolveTargetVersion(ctx context.Context, opts RunOpts) (string, ports.Release, ports.Release, error) {
+	latestRel, err := o.HTTP.LatestRelease(ctx, o.Cfg.Repo, o.Cfg.TagPrefix)
 	if err != nil {
-		return "", ports.Release{}, fmt.Errorf("query latest release: %w", err)
+		return "", ports.Release{}, ports.Release{}, fmt.Errorf("query latest release: %w", err)
 	}
-	ver := strings.TrimPrefix(rel.Tag, o.Cfg.TagPrefix)
-	if opts.Version != "" {
-		ver = opts.Version
+
+	if opts.Version == "" {
+		ver := strings.TrimPrefix(latestRel.Tag, o.Cfg.TagPrefix)
+		return ver, latestRel, latestRel, nil
 	}
-	return ver, rel, nil
+
+	// Normalize: accept "v0.4.0" as equivalent to "0.4.0". The "v" prefix
+	// is stripped only when it precedes a digit so we do not accidentally
+	// mangle non-semver targets (e.g. branch names like "vendor-fix").
+	v := opts.Version
+	if len(v) > 1 && v[0] == 'v' && v[1] >= '0' && v[1] <= '9' {
+		v = v[1:]
+	}
+
+	pinnedTag := o.Cfg.TagPrefix + v
+	pinnedRel, err := o.HTTP.GetReleaseByTag(ctx, o.Cfg.Repo, pinnedTag)
+	if err != nil {
+		return "", ports.Release{}, ports.Release{}, fmt.Errorf("release v%s not found in %s: %w", v, o.Cfg.Repo, err)
+	}
+
+	return v, pinnedRel, latestRel, nil
 }
 
 // isSameVersion returns true when target == current (semver equality, tolerating
@@ -262,28 +313,75 @@ func (o *Orchestrator) rollback(
 ) (Result, error) {
 	o.callOnRollback(failedAt, cause)
 
+	// Defensive nil-checks (B2 fix). Production callers (e.g. consumer cmd
+	// layers wiring the orchestrator manually) may forget to inject one of the
+	// ports; rollback used to panic on the FIRST line below (o.Clock.NowUTC())
+	// when Clock was nil. We now degrade gracefully: a missing Clock falls back
+	// to wall time, a missing FS skips binary restore (recorded as a manual
+	// step in the manifest), and a missing Migrator skips migration revert.
+	// The orchestrator never panics from inside rollback, regardless of how
+	// the struct was constructed.
+	var causeMsg string
+	if cause != nil {
+		causeMsg = cause.Error()
+	} else {
+		causeMsg = "rollback invoked without a cause"
+	}
+
+	appName := ""
+	if o.Cfg.BinaryPath != "" {
+		appName = filepath.Base(o.Cfg.BinaryPath)
+	}
+
+	var now time.Time
+	if o.Clock != nil {
+		now = o.Clock.NowUTC()
+	} else {
+		now = time.Now().UTC()
+	}
+
 	manifest := &recovery.Manifest{
 		Version:      1,
-		AppName:      filepath.Base(o.Cfg.BinaryPath),
+		AppName:      appName,
 		SnapshotPath: snapshotID,
-		Cause:        cause.Error(),
-		CreatedAt:    o.Clock.NowUTC(),
+		Cause:        causeMsg,
+		CreatedAt:    now,
 	}
 
 	// Determine whether migrations may have been (partially) applied.
 	// They run at StateMigrateTree; only attempt revert if we got there.
 	if StateOrder(failedAt) >= StateOrder(StateMigrateTree) {
-		// Best-effort; do not surface the individual migration error here.
-		dataRoot := o.Cfg.DataRoot
-		if revertErr := o.Migrator.Revert(ctx, dataRoot, targetVer, currentVer); revertErr != nil {
+		if o.Migrator == nil {
 			manifest.Steps = append(manifest.Steps,
-				fmt.Sprintf("manual-migration-revert: %s", revertErr.Error()))
-			// Continue to attempt binary restore even if migration revert failed.
+				"manual-migration-revert: Migrator not configured")
+		} else {
+			// Best-effort; do not surface the individual migration error here.
+			dataRoot := o.Cfg.DataRoot
+			if revertErr := o.Migrator.Revert(ctx, dataRoot, targetVer, currentVer); revertErr != nil {
+				manifest.Steps = append(manifest.Steps,
+					fmt.Sprintf("manual-migration-revert: %s", revertErr.Error()))
+				// Continue to attempt binary restore even if migration revert failed.
+			}
 		}
 	}
 
 	// Restore the binary if we have a snapshot (snapshot was taken before download).
 	if StateOrder(failedAt) >= StateOrder(StateDownloadBinary) && snapshotID != "" {
+		if o.FS == nil {
+			manifest.Steps = append(manifest.Steps,
+				fmt.Sprintf("manual-binary-restore: snapshot=%s target=%s err=FS port not configured",
+					snapshotID, o.Cfg.BinaryPath))
+			o.persistRecoveryManifest(failedAt, manifest)
+			return Result{
+				Kind:     KindFailedUnrecoverable,
+				From:     currentVer,
+				To:       targetVer,
+				Latest:   o.latestVer,
+				AtState:  StateFailedUnrecoverable,
+				Reason:   causeMsg,
+				Manifest: manifest,
+			}, nil
+		}
 		if restoreErr := o.FS.Restore(ctx, snapshotID, o.Cfg.BinaryPath); restoreErr != nil {
 			manifest.Steps = append(manifest.Steps,
 				fmt.Sprintf("manual-binary-restore: snapshot=%s target=%s err=%v",
@@ -291,8 +389,11 @@ func (o *Orchestrator) rollback(
 			o.persistRecoveryManifest(failedAt, manifest)
 			return Result{
 				Kind:     KindFailedUnrecoverable,
+				From:     currentVer,
+				To:       targetVer,
+				Latest:   o.latestVer,
 				AtState:  StateFailedUnrecoverable,
-				Reason:   cause.Error(),
+				Reason:   causeMsg,
 				Manifest: manifest,
 			}, nil
 		}
@@ -301,8 +402,11 @@ func (o *Orchestrator) rollback(
 	o.persistRecoveryManifest(failedAt, manifest)
 	return Result{
 		Kind:     KindRolledBack,
+		From:     currentVer,
+		To:       targetVer,
+		Latest:   o.latestVer,
 		AtState:  StateRolledBack,
-		Reason:   cause.Error(),
+		Reason:   causeMsg,
 		Manifest: manifest,
 	}, nil
 }
@@ -336,32 +440,68 @@ func (o *Orchestrator) persistRecoveryManifest(failedAt State, m *recovery.Manif
 // populates o.earlyResult; the dispatch loop returns that Result immediately.
 // On a forward path it stores targetVer / latestVer / currentVer / asset on
 // the orchestrator for later handlers.
+//
+// Result.From is sourced from Cfg.CurrentVersion when set (B1+B4 fix). Empty
+// CurrentVersion preserves legacy behavior: From is left blank and current-vs
+// target comparisons fall back to opts.Version pinning only.
 func (o *Orchestrator) handlePreUpdate(ctx context.Context) (State, error) {
 	currentState := StatePreUpdate
 	o.callPreUpdate(currentState)
 
-	// 1. Resolve target version (queries HTTP.LatestRelease).
-	targetVer, rel, err := o.resolveTargetVersion(ctx, o.runOpts)
+	// 1. Resolve target version. The resolver queries LatestRelease first
+	// (always, for downgrade detection and NoOp short-circuits) and then, when
+	// opts.Version is set, fetches the pinned release via GetReleaseByTag so
+	// the asset list returned belongs to the pinned tag (not latest's). This
+	// fixes B3: previously LatestRelease was queried even when a version was
+	// pinned, and the asset list returned was from latest, leading to silent
+	// latest-install when skipVerify was set.
+	//
+	// The resolver runs as the very first action of the very first handler so
+	// version resolution always precedes every downstream branch (download,
+	// verify, apply). The cosign skipVerify flag, evaluated later in
+	// handleVerify, cannot influence the value of targetVer surfaced here.
+	//
+	// On a resolution failure two paths are possible:
+	//  1. Pinned tag not found (opts.Version was set, GetReleaseByTag failed).
+	//     The error message contains "not found" and the user's intent is
+	//     unambiguous: they asked for a specific release that does not exist.
+	//     We surface a KindFailedUnrecoverable Result via earlyResult and
+	//     return nil error so the caller sees a terminal Result rather than
+	//     a Go error sentinel. Rollback is not invoked: we never took a
+	//     snapshot, so rolling back would be pure noise.
+	//  2. Any other failure (network error on LatestRelease, malformed
+	//     response, transport error on GetReleaseByTag without a 404). We
+	//     propagate as a Go error so the existing contract for transient
+	//     failures is preserved.
+	targetVer, rel, latestRel, err := o.resolveTargetVersion(ctx, o.runOpts)
 	if err != nil {
 		o.callPostUpdate(currentState)
+		if o.runOpts.Version != "" && strings.Contains(err.Error(), "not found") {
+			o.earlyResult = &Result{
+				Kind:    KindFailedUnrecoverable,
+				From:    o.Cfg.CurrentVersion,
+				To:      o.runOpts.Version,
+				AtState: StatePreUpdate,
+				Reason:  err.Error(),
+			}
+			return StatePreUpdate, nil
+		}
 		return "", err
 	}
 
-	latestVer := strings.TrimPrefix(rel.Tag, o.Cfg.TagPrefix)
+	latestVer := strings.TrimPrefix(latestRel.Tag, o.Cfg.TagPrefix)
 
-	// 2. Determine current version: use opts.Version when set for pinned target
-	// comparisons, otherwise we have no explicit current version (treat as "").
-	// The orchestrator does not exec the current binary; version logic relies on
-	// the HealthCheck result of the NEW binary.
-	//
-	// For NoOp / downgrade detection we compare against opts.Version if set.
-	currentVer := ""
+	// 2. Determine current version: prefer Cfg.CurrentVersion (B1+B4 fix) so
+	// Result.From is populated for every terminal Kind. Empty CurrentVersion
+	// keeps legacy behavior for clients that have not been updated yet.
+	currentVer := o.Cfg.CurrentVersion
 
 	// CheckOnly: just return version info, no side effects.
 	if o.runOpts.CheckOnly {
 		o.callPostUpdate(currentState)
 		o.earlyResult = &Result{
 			Kind:    KindCheckOnly,
+			From:    currentVer,
 			Latest:  latestVer,
 			To:      targetVer,
 			AtState: StatePreUpdate,
@@ -374,6 +514,7 @@ func (o *Orchestrator) handlePreUpdate(ctx context.Context) (State, error) {
 		o.callPostUpdate(currentState)
 		o.earlyResult = &Result{
 			Kind:    KindDryRun,
+			From:    currentVer,
 			Latest:  latestVer,
 			To:      targetVer,
 			AtState: StatePreUpdate,
@@ -381,13 +522,28 @@ func (o *Orchestrator) handlePreUpdate(ctx context.Context) (State, error) {
 		return StatePreUpdate, nil
 	}
 
-	// NoOp detection: only when opts.Version is explicitly pinned to the same
-	// version as the latest release. Without a pinned version we always proceed
-	// (we cannot know the installed binary's version without executing it).
+	// NoOp detection. Two paths reach this state:
+	//   (a) opts.Version is explicitly pinned to the same version as the latest
+	//       release (historical contract, retained for backward compatibility).
+	//   (b) Cfg.CurrentVersion is set AND equals targetVer (B1+B4 enabling).
+	//       Without this branch the orchestrator could not detect NoOp without
+	//       executing the current binary.
 	if o.runOpts.Version != "" && isSameVersion(o.runOpts.Version, latestVer) {
 		o.callPostUpdate(currentState)
 		o.earlyResult = &Result{
 			Kind:    KindNoOp,
+			From:    currentVer,
+			Latest:  latestVer,
+			To:      targetVer,
+			AtState: StatePreUpdate,
+		}
+		return StatePreUpdate, nil
+	}
+	if currentVer != "" && isSameVersion(currentVer, targetVer) {
+		o.callPostUpdate(currentState)
+		o.earlyResult = &Result{
+			Kind:    KindNoOp,
+			From:    currentVer,
 			Latest:  latestVer,
 			To:      targetVer,
 			AtState: StatePreUpdate,
@@ -420,7 +576,13 @@ func (o *Orchestrator) handlePreUpdate(ctx context.Context) (State, error) {
 	// Context check before destructive work.
 	select {
 	case <-ctx.Done():
-		o.earlyResult = &Result{Kind: KindCancelled, AtState: StatePreUpdate}
+		o.earlyResult = &Result{
+			Kind:    KindCancelled,
+			From:    currentVer,
+			Latest:  latestVer,
+			To:      targetVer,
+			AtState: StatePreUpdate,
+		}
 		return StatePreUpdate, ctx.Err()
 	default:
 	}
@@ -447,7 +609,13 @@ func (o *Orchestrator) handleSnapshot(ctx context.Context) (State, error) {
 	// Context check after snapshot, before download.
 	select {
 	case <-ctx.Done():
-		o.earlyResult = &Result{Kind: KindCancelled, AtState: StateSnapshotTree}
+		o.earlyResult = &Result{
+			Kind:    KindCancelled,
+			From:    o.currentVer,
+			To:      o.targetVer,
+			Latest:  o.latestVer,
+			AtState: StateSnapshotTree,
+		}
 		return StateSnapshotTree, ctx.Err()
 	default:
 	}
@@ -614,7 +782,9 @@ func (o *Orchestrator) Run(ctx context.Context, opts RunOpts) (Result, error) {
 	o.runOpts = opts
 	o.earlyResult = nil
 	o.targetVer = ""
-	o.currentVer = ""
+	// Seed currentVer from Cfg so handlers and the rollback path see the
+	// declared current version even before handlePreUpdate runs (B1+B4).
+	o.currentVer = o.Cfg.CurrentVersion
 	o.latestVer = ""
 	o.asset = ports.Asset{}
 	o.snapshotID = ""
@@ -640,9 +810,23 @@ func (o *Orchestrator) Run(ctx context.Context, opts RunOpts) (Result, error) {
 			return *o.earlyResult, err
 		}
 		if err != nil {
-			// States before StateDownloadBinary failed before any rollback-worthy
-			// change took place (no snapshot OR snapshot itself failed).
+			// Short-circuit pre-rollback (B2 fix). Two layered conditions must
+			// both hold before we hand off to rollback:
+			//   1. StateOrder(state) >= StateOrder(StateDownloadBinary) so we
+			//      have crossed the point where rollback could conceivably
+			//      have work to do (snapshot was taken, download started).
+			//   2. snapshotID != "" so rollback has at least one piece of
+			//      state to revert. Without a snapshot, the binary on disk is
+			//      the original one; calling rollback would build a manifest
+			//      whose only effect is noise on the next doctor/clean pass.
+			// If either condition fails, return the original error directly.
+			// This mirrors the spec's "if manifest == nil || len(manifest.Steps)
+			// == 0 return error" guard, expressed in terms of the live state
+			// the orchestrator actually owns (snapshotID + StateOrder).
 			if StateOrder(state) < StateOrder(StateDownloadBinary) {
+				return Result{}, err
+			}
+			if o.snapshotID == "" {
 				return Result{}, err
 			}
 			return o.rollback(ctx, state, o.snapshotID, o.targetVer, o.currentVer, err)
@@ -657,10 +841,18 @@ func (o *Orchestrator) Run(ctx context.Context, opts RunOpts) (Result, error) {
 	o.callPreUpdate(StateCommitted)
 	o.callPostUpdate(StateCommitted)
 
+	// Pick a To value that is honest with the consumer: prefer the version the
+	// new binary reported via health check; fall back to the resolved target
+	// version when health check did not report (e.g. cosign-skip variants).
+	to := o.healthVersion
+	if to == "" {
+		to = o.targetVer
+	}
+
 	return Result{
 		Kind:    KindOK,
 		From:    o.currentVer,
-		To:      o.healthVersion,
+		To:      to,
 		Latest:  o.latestVer,
 		AtState: StateCommitted,
 	}, nil

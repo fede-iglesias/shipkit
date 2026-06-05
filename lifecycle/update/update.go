@@ -11,8 +11,9 @@ import (
 )
 
 // Config holds the static configuration for the update subsystem.
-// All fields except AllowDowngrade, SkipVerify, and HealthCheckTimeout are
-// required; Validate will return ErrInvalidConfig when a required field is empty.
+// All fields except AllowDowngrade, SkipVerify, HealthCheckTimeout, and
+// CurrentVersion are required; Validate will return ErrInvalidConfig when a
+// required field is empty.
 type Config struct {
 	// Repo is the "owner/repo" slug on GitHub (e.g. "fede-iglesias/tools").
 	Repo string
@@ -32,6 +33,17 @@ type Config struct {
 	// SnapshotDir is the directory where binary snapshots are stored before
 	// replacement (e.g. "~/.myapp/snapshots"). Used to restore on rollback.
 	SnapshotDir string
+
+	// CurrentVersion is the version string of the binary currently installed
+	// (e.g. "v0.5.0" or "0.5.0"). The consumer (cmd layer) must populate this
+	// from its embedded ldflags-injected version so the orchestrator can:
+	//   - propagate it to Result.From in every terminal Kind, and
+	//   - short-circuit NoOp when the target equals current without relying
+	//     solely on opts.Version pinning.
+	// Empty means "unknown"; the orchestrator falls back to legacy behavior
+	// (Result.From left blank, no current-version NoOp detection). Backward
+	// compatible: clients that have not been updated keep working unchanged.
+	CurrentVersion string `json:"current_version,omitempty" yaml:"current_version,omitempty"`
 
 	// AllowDowngrade permits updating to a version lower than the current one.
 	// Can be overridden per-run via RunOpts.AllowDowngrade.
