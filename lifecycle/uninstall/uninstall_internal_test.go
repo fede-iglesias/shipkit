@@ -339,16 +339,26 @@ func TestBuildRcPaths_EmptyHome(t *testing.T) {
 
 // TestUninstall_WalksUpEmptyParents verifies that after removing the completion
 // script, the walk-up loop removes empty parent directories (site-functions/,
-// zsh/) but stops before removing the dataDir itself.
+// zsh/) but stops at the XDG_DATA_HOME root and never touches the app dataDir
+// (which is a sibling of zsh/ under XDG_DATA_HOME).
+//
+// XDG-real layout (matches what adapters.CobraCompletionPort + DataDir produce):
+//
+//	$T/data/                              <- XDG_DATA_HOME root (walk-up bound)
+//	$T/data/kt/                           <- dataDir for app "kt" (sibling)
+//	$T/data/zsh/site-functions/_kt        <- completion script (sibling subtree)
 func TestUninstall_WalksUpEmptyParents(t *testing.T) {
-	// Build a real tmpdir layout: T/data/zsh/site-functions/_kt
 	T := t.TempDir()
-	dataDir := filepath.Join(T, "data")
-	scriptDir := filepath.Join(dataDir, "zsh", "site-functions")
+	xdgDataHome := filepath.Join(T, "data")
+	dataDir := filepath.Join(xdgDataHome, "kt") // app-specific, sibling of zsh/
+	scriptDir := filepath.Join(xdgDataHome, "zsh", "site-functions")
 	scriptPath := filepath.Join(scriptDir, "_kt")
 
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll dataDir: %v", err)
+	}
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+		t.Fatalf("MkdirAll scriptDir: %v", err)
 	}
 	if err := os.WriteFile(scriptPath, []byte("# completion"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -387,21 +397,18 @@ func TestUninstall_WalksUpEmptyParents(t *testing.T) {
 	}
 
 	// site-functions/ must be gone (was empty after script removal).
-	if _, err := os.Stat(filepath.Join(dataDir, "zsh", "site-functions")); err == nil {
+	if _, err := os.Stat(scriptDir); err == nil {
 		t.Error("site-functions/ still exists; walk-up did not remove it")
 	}
 	// zsh/ must be gone (was empty after site-functions/ removal).
-	if _, err := os.Stat(filepath.Join(dataDir, "zsh")); err == nil {
+	if _, err := os.Stat(filepath.Join(xdgDataHome, "zsh")); err == nil {
 		t.Error("zsh/ still exists; walk-up did not remove it")
 	}
-	// dataDir itself must still exist (walk-up stops at boundary).
-	// Note: the teardown removes the dataDir itself in Stage 7, so we check
-	// that the boundary was respected by confirming walk-up did not cause a
-	// double-remove error. The tear-down sequence removes dataDir in Stage 7
-	// via RemoveDir, which calls os.Remove and may fail on a non-empty dir or
-	// succeed if already empty. Either way, no panic. We verify the walk-up
-	// respects its own boundary by confirming zsh/ and site-functions/ are gone
-	// (walk-up worked) while the completion removal was recorded.
+	// XDG_DATA_HOME root must still exist (walk-up stops at the boundary).
+	if _, err := os.Stat(xdgDataHome); err != nil {
+		t.Errorf("xdgDataHome was removed by walk-up; bound check failed: %v", err)
+	}
+	// Verify the completion removal was recorded.
 	found := false
 	for _, r := range fsPort.RemoveDirCalls {
 		if r == scriptPath {
@@ -416,16 +423,21 @@ func TestUninstall_WalksUpEmptyParents(t *testing.T) {
 
 // TestUninstall_StopsAtNonEmptyParent verifies that when a sibling file exists
 // in site-functions/, os.Remove fails on the dir and the walk-up stops there,
-// leaving site-functions/ intact.
+// leaving site-functions/ intact. Uses the XDG-real layout where the completion
+// is a sibling of dataDir under XDG_DATA_HOME.
 func TestUninstall_StopsAtNonEmptyParent(t *testing.T) {
 	T := t.TempDir()
-	dataDir := filepath.Join(T, "data")
-	scriptDir := filepath.Join(dataDir, "zsh", "site-functions")
+	xdgDataHome := filepath.Join(T, "data")
+	dataDir := filepath.Join(xdgDataHome, "kt")
+	scriptDir := filepath.Join(xdgDataHome, "zsh", "site-functions")
 	scriptPath := filepath.Join(scriptDir, "_kt")
 	sibling := filepath.Join(scriptDir, "_other")
 
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll dataDir: %v", err)
+	}
 	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+		t.Fatalf("MkdirAll scriptDir: %v", err)
 	}
 	if err := os.WriteFile(scriptPath, []byte("# completion"), 0o644); err != nil {
 		t.Fatalf("WriteFile script: %v", err)
@@ -474,29 +486,31 @@ func TestUninstall_StopsAtNonEmptyParent(t *testing.T) {
 	}
 }
 
-// TestUninstall_StopsAtDataDirBoundary verifies that the walk-up loop never
-// removes the dataDir itself (the boundary check in the loop condition).
-func TestUninstall_StopsAtDataDirBoundary(t *testing.T) {
+// TestUninstall_StopsAtXDGDataHomeBoundary verifies that the walk-up loop stops
+// exactly at XDG_DATA_HOME and never deletes the XDG root itself nor walks
+// above it. The XDG-real layout puts the completion script as a sibling of
+// dataDir, so the loop traverses zsh/site-functions/ and zsh/ but must bail
+// before removing the XDG_DATA_HOME directory.
+func TestUninstall_StopsAtXDGDataHomeBoundary(t *testing.T) {
 	T := t.TempDir()
-	dataDir := filepath.Join(T, "data")
-	// Script is a direct child of dataDir (no intermediate dir to walk through).
-	scriptPath := filepath.Join(dataDir, "_kt")
+	xdgDataHome := filepath.Join(T, "data")
+	dataDir := filepath.Join(xdgDataHome, "kt")
+	scriptDir := filepath.Join(xdgDataHome, "zsh", "site-functions")
+	scriptPath := filepath.Join(scriptDir, "_kt")
 
 	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+		t.Fatalf("MkdirAll dataDir: %v", err)
+	}
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll scriptDir: %v", err)
 	}
 	if err := os.WriteFile(scriptPath, []byte("# completion"), 0o644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	removedPaths := []string{}
 	fsPort := ports.NewMockFsPort()
 	fsPort.RemoveDirFunc = func(_ context.Context, path string) error {
-		err := os.Remove(path)
-		if err == nil {
-			removedPaths = append(removedPaths, path)
-		}
-		return err
+		return os.Remove(path)
 	}
 
 	deps := Deps{
@@ -524,15 +538,12 @@ func TestUninstall_StopsAtDataDirBoundary(t *testing.T) {
 		t.Fatalf("runTeardown returned error: %v", err)
 	}
 
-	// The walk-up loop must not have removed dataDir via os.Remove directly.
-	// (Stage 7 may remove it via RemoveDir, which goes through the mock.)
-	for _, p := range removedPaths {
-		// Filter out Stage 7 removal (dataDir itself via RemoveDir in Stage 7).
-		// The invariant: the WALK-UP loop must never have tried to go ABOVE dataDir.
-		// We confirm by checking T itself (parent of dataDir) is still present.
-		_ = p
+	// XDG_DATA_HOME root must still exist - walk-up must NEVER remove it.
+	if _, err := os.Stat(xdgDataHome); os.IsNotExist(err) {
+		t.Error("xdgDataHome was removed; walk-up did not respect the XDG_DATA_HOME boundary")
 	}
+	// tmpdir root T must obviously still be present (parent of xdgDataHome).
 	if _, err := os.Stat(T); os.IsNotExist(err) {
-		t.Error("tmpdir root T was removed; walk-up went above the dataDir boundary")
+		t.Error("tmpdir root T was removed; walk-up went above the XDG_DATA_HOME boundary")
 	}
 }

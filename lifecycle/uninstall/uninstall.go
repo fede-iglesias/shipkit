@@ -315,16 +315,21 @@ func runTeardown(ctx context.Context, deps Deps, opts Options, root *cobra.Comma
 		}
 
 		// Walk-up: after removing the script, remove any empty parent
-		// directories that are within the dataDir subtree. We use os.Remove
-		// directly (NOT deps.FS.RemoveDir, which is recursive). os.Remove on a
-		// non-empty directory fails with ENOTEMPTY, which is the intended
-		// stop condition.
+		// directories that are within the XDG_DATA_HOME subtree. Completion
+		// scripts live as siblings of the app dataDir under XDG_DATA_HOME
+		// (e.g. dataDir is $XDG_DATA_HOME/<app>, completion is
+		// $XDG_DATA_HOME/zsh/site-functions/_<app>), so the bound is the
+		// XDG root, not dataDir. We use os.Remove directly (NOT
+		// deps.FS.RemoveDir, which is recursive). os.Remove on a non-empty
+		// directory fails with ENOTEMPTY, which is the intended stop
+		// condition.
 		if dataErr == nil && dataDir != "" {
+			xdgDataHome := filepath.Dir(dataDir)
 			for parent := filepath.Dir(completionPath); parent != "" &&
 				parent != home &&
 				parent != "/" &&
-				strings.HasPrefix(parent, dataDir) &&
-				parent != dataDir; parent = filepath.Dir(parent) {
+				parent != xdgDataHome &&
+				strings.HasPrefix(parent, xdgDataHome); parent = filepath.Dir(parent) {
 				if err := os.Remove(parent); err != nil {
 					// Non-empty directory or permission error: stop walking.
 					break
