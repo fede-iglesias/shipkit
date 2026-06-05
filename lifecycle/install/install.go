@@ -179,8 +179,23 @@ type InstallMarker struct {
 	Autostart bool `json:"autostart"`
 }
 
+// ResultKind classifies the outcome of an install run.
+type ResultKind int
+
+const (
+	// ResultKindInstalled means the install ran and wrote the marker.
+	ResultKindInstalled ResultKind = iota
+	// ResultKindDryRun means --print was set; no mutations were performed.
+	ResultKindDryRun
+	// ResultKindAlreadyInstalled means the marker already existed and Force was false.
+	ResultKindAlreadyInstalled
+)
+
 // Result describes the outcome of a successful install run.
 type Result struct {
+	// Kind classifies the result (installed, dry-run, already-installed).
+	Kind ResultKind
+
 	// Marker is the JSON marker that was written (or that existed on noop).
 	Marker InstallMarker
 
@@ -224,26 +239,23 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 		return Result{}, fmt.Errorf("install: --autostart requested but Config.EnableAutostart is false; enable it in the app shipkit.Config")
 	}
 
-	// Step 1: resolve binary path.
-	binPath, err := deps.Paths.Executable()
+	// Step 1: build the plan (resolves all paths; shared by dry-run and live paths).
+	plan, err := BuildPlan(deps, opts)
 	if err != nil {
-		return Result{}, fmt.Errorf("install: resolve binary path: %w", err)
+		return Result{}, err
 	}
 
-	// Step 2: resolve data directory.
-	dataDir, err := deps.Paths.DataDir(deps.Cfg.AppName)
-	if err != nil {
-		return Result{}, fmt.Errorf("install: resolve data dir: %w", err)
-	}
+	binPath := plan.BinaryPath
+	dataDir := plan.DataDir
+	markerPath := plan.MarkerPath
 
-	markerPath := filepath.Join(dataDir, markerFileName)
-
-	// Step 3: idempotency check.
+	// Step 2: idempotency check.
 	if !opts.Force {
-		if existing, err := readMarker(ctx, deps, markerPath); err == nil {
+		if existing, readErr := readMarker(ctx, deps, markerPath); readErr == nil {
 			// Marker exists - already installed.
 			binDir := filepath.Dir(binPath)
 			return Result{
+				Kind:             ResultKindAlreadyInstalled,
 				Marker:           existing,
 				AlreadyInstalled: true,
 				PathEnsured:      deps.Paths.InPATH(binDir),
@@ -253,10 +265,10 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 
 	// Dry-run: print plan and return without mutations.
 	if opts.Print {
-		fmt.Fprintf(stderr, "install plan for %s:\n", deps.Cfg.AppName)
-		fmt.Fprintf(stderr, "  data dir:   %s\n", dataDir)
-		fmt.Fprintf(stderr, "  binary:     %s\n", binPath)
-		return Result{}, nil
+		if printErr := plan.Print(stderr); printErr != nil {
+			return Result{}, printErr
+		}
+		return Result{Kind: ResultKindDryRun}, nil
 	}
 
 	var manifest []string
@@ -264,13 +276,13 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 	var autostartInstalled bool
 	var completionShells []ports.ShellKind
 
-	// Step 4: create data directory.
+	// Step 3: create data directory.
 	if err := deps.FS.MkdirAll(ctx, dataDir, 0o755); err != nil {
 		return Result{}, fmt.Errorf("install: create data dir %s: %w", dataDir, err)
 	}
 	manifest = append(manifest, dataDir)
 
-	// Step 5: resolve the list of shells for completions.
+	// Step 4: resolve the list of shells for completions.
 	if opts.Completions == nil {
 		// Autodetect.
 		detected := deps.Env.DetectShell()
@@ -281,9 +293,9 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 		completionShells = opts.Completions
 	}
 
-	// Step 6: emit completions.
-	home, err := deps.Paths.UserHome()
-	if err != nil {
+	// Step 5: emit completions.
+	home, homeErr := deps.Paths.UserHome()
+	if homeErr != nil {
 		home = ""
 	}
 
@@ -296,42 +308,42 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 		}
 
 		// Resolve completion path.
-		compPath, err := deps.Completion.CompletionPath(shell, deps.Cfg.AppName, home)
-		if err != nil {
-			return Result{}, fmt.Errorf("install: completion path for %s: %w", shell, err)
+		compPath, compErr := deps.Completion.CompletionPath(shell, deps.Cfg.AppName, home)
+		if compErr != nil {
+			return Result{}, fmt.Errorf("install: completion path for %s: %w", shell, compErr)
 		}
 
 		// Ensure parent dir exists.
-		if err := deps.FS.MkdirAll(ctx, filepath.Dir(compPath), 0o755); err != nil {
-			return Result{}, fmt.Errorf("install: create completion dir: %w", err)
+		if mkErr := deps.FS.MkdirAll(ctx, filepath.Dir(compPath), 0o755); mkErr != nil {
+			return Result{}, fmt.Errorf("install: create completion dir: %w", mkErr)
 		}
 
 		// Write completion to a temp buffer then atomically write via a temp file.
 		var buf bytes.Buffer
-		if err := deps.Completion.EmitCompletion(shell, root, &buf); err != nil {
-			return Result{}, fmt.Errorf("install: emit completion for %s: %w", shell, err)
+		if emitErr := deps.Completion.EmitCompletion(shell, root, &buf); emitErr != nil {
+			return Result{}, fmt.Errorf("install: emit completion for %s: %w", shell, emitErr)
 		}
-		if err := deps.FS.AtomicWrite(ctx, compPath, buf.Bytes(), 0o644); err != nil {
-			return Result{}, fmt.Errorf("install: write completion %s: %w", compPath, err)
+		if writeErr := deps.FS.AtomicWrite(ctx, compPath, buf.Bytes(), 0o644); writeErr != nil {
+			return Result{}, fmt.Errorf("install: write completion %s: %w", compPath, writeErr)
 		}
 		completionsWritten[shell] = compPath
 		manifest = append(manifest, compPath)
 	}
 
-	// Step 7: inject shell RC hooks (skip fish - fish autoloads completions).
+	// Step 6: inject shell RC hooks (skip fish - fish autoloads completions).
 	detectedShell := deps.Env.DetectShell()
 	if detectedShell != ports.ShellFish && detectedShell != ports.ShellUnknown {
-		rcPath, err := shellRcPath(detectedShell, home)
-		if err == nil && rcPath != "" {
+		rcPath, rcErr := shellRcPath(detectedShell, home)
+		if rcErr == nil && rcPath != "" {
 			blockContent := fpathBlock(deps.Cfg.AppName, completionsWritten[detectedShell])
-			if _, err := deps.ShellRc.EnsureBlock(rcPath, "fpath", blockContent); err != nil {
-				return Result{}, fmt.Errorf("install: ensure shell rc block: %w", err)
+			if _, ensureErr := deps.ShellRc.EnsureBlock(rcPath, "fpath", blockContent); ensureErr != nil {
+				return Result{}, fmt.Errorf("install: ensure shell rc block: %w", ensureErr)
 			}
 			manifest = append(manifest, rcPath)
 		}
 	}
 
-	// Step 8: install autostart unit.
+	// Step 7: install autostart unit.
 	if opts.Autostart && deps.Cfg.EnableAutostart {
 		unit := ports.AutostartUnit{
 			Label:     deps.Cfg.autostartLabel(),
@@ -340,13 +352,13 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 			KeepAlive: true,
 			RunAtLoad: true,
 		}
-		if err := deps.Autostart.Install(unit); err != nil {
-			return Result{}, fmt.Errorf("install: autostart install: %w", err)
+		if asErr := deps.Autostart.Install(unit); asErr != nil {
+			return Result{}, fmt.Errorf("install: autostart install: %w", asErr)
 		}
 		autostartInstalled = true
 	}
 
-	// Step 9: write marker (last step).
+	// Step 8: write marker (last step).
 	now := deps.Clock.NowUTC()
 	shells := make([]ports.ShellKind, 0, len(completionsWritten))
 	for s := range completionsWritten {
@@ -367,8 +379,8 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 	// and a slice of ShellKind (string), so this panic is a compile-time
 	// invariant guard, not a runtime error path.
 	markerJSON := marshalInstallMarker(marker)
-	if err := deps.FS.AtomicWrite(ctx, markerPath, markerJSON, 0o644); err != nil {
-		return Result{}, fmt.Errorf("install: write marker: %w", err)
+	if writeErr := deps.FS.AtomicWrite(ctx, markerPath, markerJSON, 0o644); writeErr != nil {
+		return Result{}, fmt.Errorf("install: write marker: %w", writeErr)
 	}
 	manifest = append(manifest, markerPath)
 

@@ -215,3 +215,42 @@ func TestMarshalInstallMarker(t *testing.T) {
 		t.Errorf("missing installed_at: %s", b)
 	}
 }
+
+// TestFirstNLines_ShortString verifies that firstNLines returns s unchanged when
+// it has fewer lines than n.
+func TestFirstNLines_ShortString(t *testing.T) {
+	s := "line one\nline two"
+	got := firstNLines(s, 5)
+	if got != s {
+		t.Errorf("firstNLines short string = %q; want %q", got, s)
+	}
+}
+
+// TestFirstNLines_TruncatesLong verifies that firstNLines returns only the
+// first n lines when s has more than n lines.
+func TestFirstNLines_TruncatesLong(t *testing.T) {
+	s := "a\nb\nc\nd\ne"
+	got := firstNLines(s, 3)
+	want := "a\nb\nc"
+	if got != want {
+		t.Errorf("firstNLines long string = %q; want %q", got, want)
+	}
+}
+
+// TestAutostartUnitPath_Darwin verifies the darwin plist path.
+func TestAutostartUnitPath_Darwin(t *testing.T) {
+	got := autostartUnitPath("/home/user", "com.example.app", "darwin")
+	want := "/home/user/Library/LaunchAgents/com.example.app.plist"
+	if got != want {
+		t.Errorf("autostartUnitPath darwin = %q; want %q", got, want)
+	}
+}
+
+// TestAutostartUnitPath_Linux verifies the linux systemd-user path.
+func TestAutostartUnitPath_Linux(t *testing.T) {
+	got := autostartUnitPath("/home/user", "com.example.app", "linux")
+	want := "/home/user/.config/systemd/user/com.example.app.service"
+	if got != want {
+		t.Errorf("autostartUnitPath linux = %q; want %q", got, want)
+	}
+}
