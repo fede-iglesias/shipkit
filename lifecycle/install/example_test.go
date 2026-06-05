@@ -69,5 +69,5 @@ func ExampleRun() {
 	// version: v0.1.0
 	// bin_path: /usr/local/bin/myapp
 	// path_ensured: true
-	// manifest_items: 2
+	// manifest_items: 4
 }

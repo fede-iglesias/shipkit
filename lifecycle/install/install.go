@@ -282,6 +282,23 @@ func Run(ctx context.Context, deps Deps, opts Options, root *cobra.Command) (Res
 	}
 	manifest = append(manifest, dataDir)
 
+	// Step 3a: create config + cache directories so the install matches the
+	// plan output. Both are best-effort upstream (Plan resolves them with
+	// `_`-discarded error), so non-fatal here too: a missing XDG_CONFIG_HOME
+	// on a malformed host should not block install.
+	configDir, _ := deps.Paths.ConfigDir(deps.Cfg.AppName)
+	if configDir != "" {
+		if err := deps.FS.MkdirAll(ctx, configDir, 0o755); err == nil {
+			manifest = append(manifest, configDir)
+		}
+	}
+	cacheDir, _ := deps.Paths.CacheDir(deps.Cfg.AppName)
+	if cacheDir != "" {
+		if err := deps.FS.MkdirAll(ctx, cacheDir, 0o755); err == nil {
+			manifest = append(manifest, cacheDir)
+		}
+	}
+
 	// Step 4: resolve the list of shells for completions.
 	if opts.Completions == nil {
 		// Autodetect.
