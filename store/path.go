@@ -173,6 +173,8 @@ func KindFromPath(rel string) (string, error) {
 		return "report", nil
 	case strings.HasPrefix(rest, "incidents/"):
 		return "incident", nil
+	case strings.HasPrefix(rest, "policies/git/"):
+		return "policy-git", nil
 	default:
 		return "", fmt.Errorf("store: cannot determine card kind from path %q", rel)
 	}

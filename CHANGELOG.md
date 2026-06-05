@@ -6,6 +6,14 @@ per published Go module.
 
 ## [Unreleased]
 
+## store/v0.1.1 - 2026-06-05
+
+Soporte para reconocer paths `knowledge/policies/git/` como type `policy-git`. Sin breaking changes.
+
+### Added
+
+- `KindFromPath`: nuevo case `policies/git/` que devuelve kind `"policy-git"`. Habilita a consumidores (ej. kt) registrar el type `policy-git` con archivos bajo `knowledge/policies/git/<slug>.md`.
+
 ## [0.2.2] - 2026-06-05
 
 Hot-fix release. Retracts v0.2.1.
