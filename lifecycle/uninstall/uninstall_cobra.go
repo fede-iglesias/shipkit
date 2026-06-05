@@ -41,23 +41,18 @@ Use --keep-data, --keep-config, or --keep-binary to selectively preserve
 directories or the binary. Use --print to preview the plan without making
 any changes.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Dry-run: build and print the plan without touching anything.
+			if opts.Print {
+				plan, err := BuildPlan(deps, opts)
+				if err != nil {
+					return err
+				}
+				return plan.Print(cmd.OutOrStdout())
+			}
+
 			result, err := Run(context.Background(), deps, opts, root)
 			if err != nil {
 				return err
-			}
-			// Print a summary of what was done (or would be done with --print).
-			if opts.Print {
-				fmt.Fprintf(cmd.OutOrStdout(), "Dry-run: would remove:\n")
-				for _, r := range result.Removed {
-					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", r)
-				}
-				if len(result.Skipped) > 0 {
-					fmt.Fprintf(cmd.OutOrStdout(), "Would keep:\n")
-					for _, s := range result.Skipped {
-						fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", s)
-					}
-				}
-				return nil
 			}
 			// Real run: report next steps if any.
 			if len(result.NextSteps) > 0 {

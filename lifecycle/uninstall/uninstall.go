@@ -47,6 +47,9 @@ package uninstall
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/fede-iglesias/shipkit/ports"
 	"github.com/spf13/cobra"
@@ -287,6 +290,7 @@ func runTeardown(ctx context.Context, deps Deps, opts Options, root *cobra.Comma
 
 	// Stage 5: remove completion files.
 	home, _ := deps.Paths.UserHome()
+	dataDir, dataErr := deps.Paths.DataDir(deps.AppName)
 	shells := deps.ShellKinds
 	if len(shells) == 0 {
 		shells = []ports.ShellKind{ports.ShellBash, ports.ShellZsh, ports.ShellFish}
@@ -307,6 +311,25 @@ func runTeardown(ctx context.Context, deps Deps, opts Options, root *cobra.Comma
 			result.Removed = append(result.Removed, completionPath)
 		} else {
 			result.Skipped = append(result.Skipped, completionPath)
+			continue
+		}
+
+		// Walk-up: after removing the script, remove any empty parent
+		// directories that are within the dataDir subtree. We use os.Remove
+		// directly (NOT deps.FS.RemoveDir, which is recursive). os.Remove on a
+		// non-empty directory fails with ENOTEMPTY, which is the intended
+		// stop condition.
+		if dataErr == nil && dataDir != "" {
+			for parent := filepath.Dir(completionPath); parent != "" &&
+				parent != home &&
+				parent != "/" &&
+				strings.HasPrefix(parent, dataDir) &&
+				parent != dataDir; parent = filepath.Dir(parent) {
+				if err := os.Remove(parent); err != nil {
+					// Non-empty directory or permission error: stop walking.
+					break
+				}
+			}
 		}
 	}
 
@@ -323,7 +346,7 @@ func runTeardown(ctx context.Context, deps Deps, opts Options, root *cobra.Comma
 	}
 
 	// Stage 7: remove directories.
-	dataDir, dataErr := deps.Paths.DataDir(deps.AppName)
+	// dataDir and dataErr were already resolved in Stage 5.
 	configDir, configErr := deps.Paths.ConfigDir(deps.AppName)
 	cacheDir, cacheErr := deps.Paths.CacheDir(deps.AppName)
 
