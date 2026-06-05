@@ -6,6 +6,29 @@ per published Go module.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-06-05
+
+Bugfix release for lifecycle verbs detected in kt cancha session.
+
+### Fixed
+
+- `lifecycle/uninstall`: walks up empty parent directories after removing
+  completion scripts, bounded by `XDG_DATA_HOME` root (not the per-app data
+  dir). The previous bound prevented walk-up beyond the app directory, so
+  shared dirs like `$XDG_DATA_HOME/zsh/site-functions` were left orphaned
+  after the app's own completion file was removed.
+- `lifecycle/install --print` and `lifecycle/uninstall --print`: new `Plan`
+  struct enumerates completion paths, shell RC blocks, marker file, and
+  autostart info instead of only data dir and binary path.
+- `example/shipkit-example` go.mod and go.sum tidied post v0.2.0 bump (CI
+  build of v0.0.1 in cancha was failing with missing go.sum entries).
+
+### Changed (dependency graph)
+
+- `lifecycle/install` v0.2.0 to v0.2.1.
+- `lifecycle/uninstall` v0.1.0 to v0.1.1.
+- Root v0.2.0 to v0.2.1 (pins the above).
+
 ## [0.2.0] - 2026-06-04
 
 ### Added
