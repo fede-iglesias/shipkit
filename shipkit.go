@@ -331,6 +331,13 @@ func UninstallCmd(cfg Config, opts ...Option) (*cobra.Command, error) {
 		Completion:     coalesce[ports.CompletionPort](o.completion, adapters.NewCompletionCobra()),
 		Autostart:      coalesce[ports.AutostartPort](o.autostart, adapters.NewAutostartReal()),
 		Prompt:         coalesce[ports.PromptPort](o.prompt, adapters.NewPromptTerm()),
+		// RemoveBinaryFunc wires the default binary deletion. Without this,
+		// resolveBinaryAction falls back to BinaryKept and the binary survives
+		// the uninstall even when --keep-binary was not passed. os.Remove
+		// unlinks the file: the running process keeps executing until exit
+		// (Unix inode semantics), then subsequent invocations fail because the
+		// path is gone.
+		RemoveBinaryFunc: os.Remove,
 	}
 	return uninstall.NewCommand(deps, nil), nil
 }

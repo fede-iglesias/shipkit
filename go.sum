@@ -11,8 +11,8 @@ github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0 h1:o22zMiKLjwt5ieJi
 github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0/go.mod h1:lrKWFB3Xj464Vk5nhBHpljZj0mWJRu2K/AawAnxTMOI=
 github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0 h1:dR1lA/KOWGaHTSmjgqcbpPL+hMIdpAsDHjAyi0IxnK4=
 github.com/fede-iglesias/shipkit/lifecycle/recovery v0.1.0/go.mod h1:WixpKKr3wRgTniGVjT6REdSnKYoh4UCEikV63x6Z17M=
-github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.2 h1:lJqDJsnRCIJ9S+6/YYXwblBMT8Zso1j8gTdSnTaxz+U=
-github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.2/go.mod h1:AcPTp9q6ywm034Je0EXaE2/WS+NqcNKe/tzBYHeafKs=
+github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.3 h1:TEQtalRXJ+bHi7gQAexv/TqAZ+wgN8NbV4Z5t0Zky0g=
+github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.3/go.mod h1:AcPTp9q6ywm034Je0EXaE2/WS+NqcNKe/tzBYHeafKs=
 github.com/fede-iglesias/shipkit/lifecycle/update v0.2.2 h1:mSfnrl5D1nvoF201KRiJUvtm+ls7dtWi4v+FRI2PA/c=
 github.com/fede-iglesias/shipkit/lifecycle/update v0.2.2/go.mod h1:lzPGHzYrjpkmgBSsVJ01bwAnDLez/sx0wvUPRQWlgSM=
 github.com/fede-iglesias/shipkit/ports v0.2.0 h1:cFy7tmhXSnvprHzQmVN77DBiPaeUnoE3v0ArmF7hdH4=

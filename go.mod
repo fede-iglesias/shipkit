@@ -8,7 +8,7 @@ require (
 	github.com/fede-iglesias/shipkit/lifecycle/doctor v0.2.0
 	github.com/fede-iglesias/shipkit/lifecycle/install v0.2.3
 	github.com/fede-iglesias/shipkit/lifecycle/migrations v0.1.0
-	github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.2
+	github.com/fede-iglesias/shipkit/lifecycle/uninstall v0.1.3
 	github.com/fede-iglesias/shipkit/lifecycle/update v0.2.2
 	github.com/fede-iglesias/shipkit/ports v0.2.0
 	github.com/spf13/cobra v1.10.2
