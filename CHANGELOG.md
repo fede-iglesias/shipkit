@@ -6,6 +6,30 @@ per published Go module.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-06-05
+
+Hot-fix release. Retracts v0.2.1.
+
+### Fixed
+
+- `lifecycle/install`: dropped a no-op self-assignment (`deps.FS = deps.FS`)
+  in `plan_test.go` that `go vet` flagged, causing the release workflow to
+  fail for tag `lifecycle/install/v0.2.1`.
+- root `go.mod` / `go.sum`: included entries for `lifecycle/install` v0.2.2
+  and `lifecycle/uninstall` v0.1.1 by running `go mod tidy` after creating
+  the submodule tag locally.
+
+### Retracted
+
+- `lifecycle/install` v0.2.1: vet self-assignment, use v0.2.2.
+- root v0.2.1: missing go.sum entries, use v0.2.2.
+
+### Changed (dependency graph)
+
+- `lifecycle/install` v0.2.1 (retracted) to v0.2.2.
+- `lifecycle/uninstall` stays at v0.1.1 (release was clean).
+- Root v0.2.1 (retracted) to v0.2.2.
+
 ## [0.2.1] - 2026-06-05
 
 Bugfix release for lifecycle verbs detected in kt cancha session.

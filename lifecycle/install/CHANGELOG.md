@@ -5,6 +5,21 @@ All notable changes to this module will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this module adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.2] - 2026-06-05
+
+Hot-fix release. Retracts v0.2.1.
+
+### Fixed
+
+- Dropped a no-op self-assignment (`deps.FS = deps.FS`) in `plan_test.go`
+  that `go vet` flagged, causing the release workflow to fail for tag
+  `lifecycle/install/v0.2.1`. The line had no runtime effect; removing it
+  unblocks the release pipeline.
+
+### Retracted
+
+- v0.2.1: vet self-assignment, use v0.2.2.
+
 ## [0.2.1] - 2026-06-05
 
 ### Fixed
