@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.2.3] - 2026-06-05
+
+### Added
+
+- Coverage-completion tests for branches the v0.2.2 cut left at 95-97%:
+  realClock.NowUTC and realClock.Since, the default hostOS / hostArch
+  lambdas, archAliases / osAliases / containsToken alias-table branches,
+  rollback's nil-cause / nil-FS / nil-Migrator defensive paths,
+  handleDownload's bundle-open error branch, the dispatch-loop short-circuit
+  when snapshotID is empty, the OK-path To-fallback when health.Version is
+  empty, and Restore's nil-ChmodFn fallback. No behavior change; coverage
+  now satisfies the shipkit release gate (100% floor for library modules).
+
+### Note
+
+`v0.2.2` was tagged but did not produce a GitHub Release because the
+coverage gate rejected the build at 95.2% on the update package. The fix
+ships forward as `v0.2.3`. `go get
+github.com/fede-iglesias/shipkit/lifecycle/update@v0.2.2` still works for
+consumers (Go modules are immutable and the source is identical for the
+bugfix surface area); upgrading to v0.2.3 only adds tests.
+
 ## [0.2.2] - 2026-06-05
 
 ### Fixed

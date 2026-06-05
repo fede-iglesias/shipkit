@@ -54,9 +54,22 @@ any changes.`,
 			if err != nil {
 				return err
 			}
-			// Real run: report next steps if any.
+			// Real run: report what was removed first, so the user gets visible
+			// evidence of work done instead of a single terse "Binary:" line.
+			if len(result.Removed) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Removed:")
+				for _, p := range result.Removed {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", p)
+				}
+			}
+			if len(result.Skipped) > 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "Skipped:")
+				for _, p := range result.Skipped {
+					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", p)
+				}
+			}
 			if len(result.NextSteps) > 0 {
-				fmt.Fprintf(cmd.OutOrStdout(), "Manual steps required:\n")
+				fmt.Fprintln(cmd.OutOrStdout(), "Manual steps required:")
 				for _, step := range result.NextSteps {
 					fmt.Fprintf(cmd.OutOrStdout(), "  %s\n", step)
 				}

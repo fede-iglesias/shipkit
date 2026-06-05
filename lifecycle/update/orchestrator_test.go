@@ -25,6 +25,14 @@ import (
 // canonical asset name, so the test process pretends to be linux/amd64 by
 // default. Tests that exercise the matcher itself (TestFindAsset_*) override
 // these via setHostForTest below.
+//
+// originalHostOS / originalHostArch capture the package-level lambdas before
+// TestMain overrides them, so TestHostOS_HostArch_DefaultLambdas in
+// orchestrator_b5b6b7_test.go can call the original lambda bodies and report
+// their result for coverage purposes.
+var originalHostOS = hostOS
+var originalHostArch = hostArch
+
 func TestMain(m *testing.M) {
 	prevOS := hostOS
 	prevArch := hostArch

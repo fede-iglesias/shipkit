@@ -165,6 +165,49 @@ func TestRestore_FallsBackTo0755_WhenSnapshotHasNoExecBit(t *testing.T) {
 	}
 }
 
+// TestRestore_NilChmodFn_FallsBackToOsChmod asserts the defensive
+// fallback for adapters constructed via struct literal that forget to wire
+// ChmodFn: Restore falls back to os.Chmod and still produces an executable
+// file. This mirrors the historical pattern where NewRealFs is the
+// production constructor but tests sometimes build a raw struct literal.
+func TestRestore_NilChmodFn_FallsBackToOsChmod(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("perm bits semantics differ on Windows")
+	}
+	dir := t.TempDir()
+
+	snapSubdir := filepath.Join(dir, "snapshots", "snap")
+	if err := os.MkdirAll(snapSubdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	snapFile := filepath.Join(snapSubdir, "bin")
+	if err := os.WriteFile(snapFile, []byte("x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(snapFile, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dst := filepath.Join(dir, "bin")
+	if err := os.WriteFile(dst, []byte("cur"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	a := adapters.NewRealFs()
+	a.ChmodFn = nil // simulate struct-literal construction missing ChmodFn
+
+	if err := a.Restore(context.Background(), snapSubdir, dst); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	fi, err := os.Stat(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o755 {
+		t.Fatalf("nil ChmodFn fallback: perm = %o, want 0o755", perm)
+	}
+}
+
 // TestRestore_ChmodErrorIsSurfaced asserts that when the Chmod step fails
 // (e.g. permission denied on the target), Restore returns a clean error
 // rather than silently swallowing the perm bug.
