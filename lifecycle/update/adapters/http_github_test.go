@@ -232,6 +232,168 @@ func TestLatestRelease_SortedByPublishedAtDesc(t *testing.T) {
 	}
 }
 
+// --- GetReleaseByTag tests ---
+
+// serveTagLookup mimics GitHub's GET /repos/{repo}/releases/tags/{tag}.
+// When tag matches release.TagName, returns 200 + JSON of release.
+// Otherwise returns 404.
+func serveTagLookup(t *testing.T, release ghRelease) *httptest.Server {
+	t.Helper()
+	body := mustMarshal(t, release)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Expected path: /repos/{repo}/releases/tags/{tag}
+		// We just check that the path ends with the expected tag.
+		if !endsWithTag(r.URL.Path, release.TagName) {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func endsWithTag(path, tag string) bool {
+	n := len(path)
+	m := len(tag)
+	if n < m {
+		return false
+	}
+	return path[n-m:] == tag
+}
+
+func TestGetReleaseByTag_HappyPath(t *testing.T) {
+	release := ghRelease{
+		TagName:     "myapp-v0.4.0",
+		PublishedAt: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Assets: []ghAsset{
+			{
+				Name:               "myapp_0.4.0_linux_amd64.tar.gz",
+				BrowserDownloadURL: "https://example.com/myapp-0.4.0.tar.gz",
+				Size:               4000,
+			},
+		},
+	}
+
+	srv := serveTagLookup(t, release)
+	a := newAdapter(t, srv.URL)
+
+	rel, err := a.GetReleaseByTag(context.Background(), "owner/repo", "myapp-v0.4.0")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if rel.Tag != "myapp-v0.4.0" {
+		t.Fatalf("Tag = %q, want %q", rel.Tag, "myapp-v0.4.0")
+	}
+	if len(rel.Assets) != 1 {
+		t.Fatalf("Assets len = %d, want 1", len(rel.Assets))
+	}
+	if rel.Assets[0].Name != "myapp_0.4.0_linux_amd64.tar.gz" {
+		t.Fatalf("Asset.Name = %q", rel.Assets[0].Name)
+	}
+	if rel.Assets[0].DownloadURL != "https://example.com/myapp-0.4.0.tar.gz" {
+		t.Fatalf("Asset.DownloadURL = %q", rel.Assets[0].DownloadURL)
+	}
+	if rel.Assets[0].Size != 4000 {
+		t.Fatalf("Asset.Size = %d, want 4000", rel.Assets[0].Size)
+	}
+}
+
+func TestGetReleaseByTag_NotFoundReturnsErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newAdapter(t, srv.URL)
+	_, err := a.GetReleaseByTag(context.Background(), "owner/repo", "myapp-v99.99.99")
+	if err == nil {
+		t.Fatal("expected error for 404, got nil")
+	}
+	// Reason must include "not found" so the orchestrator can surface a stable
+	// substring in Result.Reason without parsing wrapped error chains.
+	if !contains(err.Error(), "not found") {
+		t.Fatalf("error message %q must contain %q", err.Error(), "not found")
+	}
+}
+
+func TestGetReleaseByTag_HTTPErrorReturnsErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newAdapter(t, srv.URL)
+	_, err := a.GetReleaseByTag(context.Background(), "owner/repo", "myapp-v0.4.0")
+	if err == nil {
+		t.Fatal("expected error for 500, got nil")
+	}
+}
+
+func TestGetReleaseByTag_MalformedJSONReturnsErr(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `not-json`)
+	}))
+	t.Cleanup(srv.Close)
+
+	a := newAdapter(t, srv.URL)
+	_, err := a.GetReleaseByTag(context.Background(), "owner/repo", "myapp-v0.4.0")
+	if err == nil {
+		t.Fatal("expected error for malformed JSON, got nil")
+	}
+}
+
+func TestGetReleaseByTag_ContextCancelled(t *testing.T) {
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	a := newAdapter(t, srv.URL)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := a.GetReleaseByTag(ctx, "owner/repo", "myapp-v0.4.0")
+		done <- err
+	}()
+
+	<-started
+	cancel()
+
+	err := <-done
+	if err == nil {
+		t.Fatal("expected error for cancelled context, got nil")
+	}
+}
+
+func TestGetReleaseByTag_InvalidBaseURLReturnsErr(t *testing.T) {
+	a := adapters.NewGitHubHTTP()
+	a.BaseURL = "http://\x00invalid"
+
+	_, err := a.GetReleaseByTag(context.Background(), "owner/repo", "myapp-v0.4.0")
+	if err == nil {
+		t.Fatal("expected error for invalid URL, got nil")
+	}
+}
+
+// contains is a tiny helper to avoid importing strings just for this test.
+func contains(s, substr string) bool {
+	if len(substr) == 0 {
+		return true
+	}
+	for i := 0; i+len(substr) <= len(s); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
 // --- DownloadAsset tests ---
 
 func TestDownloadAsset_HappyPath(t *testing.T) {

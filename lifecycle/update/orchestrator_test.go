@@ -3,6 +3,7 @@ package update
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,8 +22,9 @@ import (
 
 // mockHTTPPort captures calls and allows injectable failure per method.
 type mockHTTPPort struct {
-	latestReleaseFn func(ctx context.Context, repo, tagPrefix string) (ports.Release, error)
-	downloadAssetFn func(ctx context.Context, url string, w io.Writer) error
+	latestReleaseFn   func(ctx context.Context, repo, tagPrefix string) (ports.Release, error)
+	getReleaseByTagFn func(ctx context.Context, repo, tag string) (ports.Release, error)
+	downloadAssetFn   func(ctx context.Context, url string, w io.Writer) error
 }
 
 func (m *mockHTTPPort) LatestRelease(ctx context.Context, repo, tagPrefix string) (ports.Release, error) {
@@ -31,6 +33,21 @@ func (m *mockHTTPPort) LatestRelease(ctx context.Context, repo, tagPrefix string
 	}
 	return ports.Release{
 		Tag:    tagPrefix + "v0.1.0",
+		Assets: []ports.Asset{{Name: "myapp_linux_amd64.tar.gz", DownloadURL: "http://example.com/myapp.tar.gz"}},
+	}, nil
+}
+
+// GetReleaseByTag default: echoes the tag back with a standard asset list, so
+// existing tests that pin opts.Version (and previously relied on LatestRelease
+// returning the assets) keep working without explicit setup. The tag returned
+// is identical to the one requested, ensuring the orchestrator's downstream
+// targetVer normalization is consistent with the tag asked for.
+func (m *mockHTTPPort) GetReleaseByTag(ctx context.Context, repo, tag string) (ports.Release, error) {
+	if m.getReleaseByTagFn != nil {
+		return m.getReleaseByTagFn(ctx, repo, tag)
+	}
+	return ports.Release{
+		Tag:    tag,
 		Assets: []ports.Asset{{Name: "myapp_linux_amd64.tar.gz", DownloadURL: "http://example.com/myapp.tar.gz"}},
 	}, nil
 }
@@ -179,15 +196,30 @@ func baseOrchestrator(cfg Config) *Orchestrator {
 	}
 }
 
-// releaseVersion creates an HTTPPort that reports a specific version as the latest release.
+// releaseVersion creates an HTTPPort that reports a specific version as the
+// latest release. The same release shape is returned by GetReleaseByTag when
+// the caller asks for the latest tag; for any other tag GetReleaseByTag
+// returns a release whose Tag echoes the requested tag with the standard
+// asset list (mirrors GitHub's tag lookup happy path for existing tags).
+//
+// Tests that need GetReleaseByTag to error (e.g. "release not found") MUST
+// override getReleaseByTagFn explicitly on the returned mock.
 func releaseVersion(tagPrefix, ver string) *mockHTTPPort {
+	latestTag := tagPrefix + ver
+	stdAssets := []ports.Asset{
+		{Name: "myapp_linux_amd64.tar.gz", DownloadURL: "http://example.com/myapp.tar.gz"},
+	}
 	return &mockHTTPPort{
 		latestReleaseFn: func(ctx context.Context, repo, tp string) (ports.Release, error) {
 			return ports.Release{
-				Tag: tp + ver,
-				Assets: []ports.Asset{
-					{Name: "myapp_linux_amd64.tar.gz", DownloadURL: "http://example.com/myapp.tar.gz"},
-				},
+				Tag:    latestTag,
+				Assets: stdAssets,
+			}, nil
+		},
+		getReleaseByTagFn: func(ctx context.Context, repo, tag string) (ports.Release, error) {
+			return ports.Release{
+				Tag:    tag,
+				Assets: stdAssets,
 			}, nil
 		},
 	}
@@ -1187,5 +1219,417 @@ func TestOrchestrator_RollbackManifestWriteFailureDoesNotMaskCause(t *testing.T)
 	persistCause := hookCauses[len(hookCauses)-1]
 	if persistCause == nil || !strings.Contains(persistCause.Error(), "persist recovery manifest") {
 		t.Errorf("last OnRollback cause should reference manifest persistence, got %v", persistCause)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B1+B4: Result.From populated from Cfg.CurrentVersion
+// ---------------------------------------------------------------------------
+
+// TestRun_PopulatesResultFromCurrentVersion asserts that Result.From equals
+// Cfg.CurrentVersion for every terminal Kind when CurrentVersion is set.
+// Reproduces B1: before the fix, From was always "" regardless of Config.
+func TestRun_PopulatesResultFromCurrentVersion(t *testing.T) {
+	// Reproduces B1
+
+	cases := []struct {
+		name string
+		opts RunOpts
+		kind Kind
+	}{
+		{
+			name: "CheckOnly",
+			opts: RunOpts{CheckOnly: true},
+			kind: KindCheckOnly,
+		},
+		{
+			name: "DryRun",
+			opts: RunOpts{DryRun: true},
+			kind: KindDryRun,
+		},
+		{
+			name: "NoOp via currentVer==targetVer",
+			// Latest release is v0.5.0; CurrentVersion also 0.5.0 => NoOp.
+			opts: RunOpts{},
+			kind: KindNoOp,
+		},
+		{
+			name: "KindOK full run",
+			// Latest is v0.6.0, current is 0.5.0 => full forward path.
+			opts: RunOpts{},
+			kind: KindOK,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.CurrentVersion = "0.5.0"
+			o := baseOrchestrator(cfg)
+
+			switch tc.kind {
+			case KindNoOp:
+				// Latest == current => NoOp.
+				o.HTTP = releaseVersion("myapp-", "0.5.0")
+			case KindOK:
+				// Latest > current => full run; spawn reports new version.
+				o.HTTP = releaseVersion("myapp-", "0.6.0")
+				o.Spawn = &mockSpawnPort{
+					healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+						return ports.HealthResult{Ok: true, Version: "0.6.0"}, nil
+					},
+				}
+			default:
+				// CheckOnly / DryRun: latest doesn't matter, just needs a valid release.
+				o.HTTP = releaseVersion("myapp-", "0.5.0")
+			}
+
+			res, err := o.Run(context.Background(), tc.opts)
+			if err != nil {
+				t.Fatalf("[%s] want nil error, got %v", tc.name, err)
+			}
+			if res.Kind != tc.kind {
+				t.Fatalf("[%s] want Kind=%s, got %s", tc.name, tc.kind, res.Kind)
+			}
+			if res.From != "0.5.0" {
+				t.Fatalf("[%s] want From=%q, got %q (B1: From must equal Cfg.CurrentVersion)", tc.name, "0.5.0", res.From)
+			}
+		})
+	}
+}
+
+// TestRun_EmptyCurrentVersionStillWorks asserts backward compatibility:
+// when Cfg.CurrentVersion is empty, Result.From is "" and no error occurs.
+// Reproduces B1: verifies empty is not a regression.
+func TestRun_EmptyCurrentVersionStillWorks(t *testing.T) {
+	// Reproduces B1
+
+	cfg := defaultConfig()
+	// CurrentVersion intentionally left empty.
+	o := baseOrchestrator(cfg)
+	o.HTTP = releaseVersion("myapp-", "0.6.0")
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: true, Version: "0.6.0"}, nil
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	if res.Kind != KindOK {
+		t.Fatalf("want KindOK, got %s", res.Kind)
+	}
+	if res.From != "" {
+		t.Fatalf("want From=\"\" when CurrentVersion is empty, got %q", res.From)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B2: panic eliminated - rollback nil-safety
+// ---------------------------------------------------------------------------
+
+// TestRun_NoPanicOnSameVersionAsLatest asserts that when the installed version
+// equals the latest release, Run returns KindNoOp without panicking and without
+// triggering rollback.
+// Reproduces B2: before the fix, the nil Clock inside rollback caused a panic
+// when the dispatch loop entered rollback on an improperly constructed
+// Orchestrator. This test verifies the NoOp short-circuit fires first and
+// rollback is never reached.
+func TestRun_NoPanicOnSameVersionAsLatest(t *testing.T) {
+	// Reproduces B2
+
+	cfg := defaultConfig()
+	cfg.CurrentVersion = "0.5.0"
+	o := baseOrchestrator(cfg)
+	// Latest == current: 0.5.0 == 0.5.0. The handlePreUpdate NoOp branch fires.
+	o.HTTP = releaseVersion("myapp-", "0.5.0")
+
+	var rollbackCalled bool
+	o.Hooks = Hooks{
+		OnRollback: func(_ State, _ error) {
+			rollbackCalled = true
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	if res.Kind != KindNoOp {
+		t.Fatalf("want KindNoOp, got %s", res.Kind)
+	}
+	if rollbackCalled {
+		t.Fatal("rollback must not be invoked on a NoOp path")
+	}
+}
+
+// TestRun_NoPanicOnTargetNotFound asserts that when the caller pins
+// opts.Version to a tag that does not exist in the repo, the orchestrator
+// returns KindFailedUnrecoverable with a Reason containing "not found",
+// without panicking and without invoking rollback (no snapshot was taken).
+// Reproduces B3 (target-version resolution failure path).
+func TestRun_NoPanicOnTargetNotFound(t *testing.T) {
+	// Reproduces B3
+
+	cfg := defaultConfig()
+	cfg.CurrentVersion = "0.5.0"
+	o := baseOrchestrator(cfg)
+	o.HTTP = &mockHTTPPort{
+		// Latest is v0.5.0 (no v99.99.99 exists).
+		latestReleaseFn: func(_ context.Context, _, _ string) (ports.Release, error) {
+			return ports.Release{
+				Tag: "myapp-v0.5.0",
+				Assets: []ports.Asset{
+					{Name: "myapp_linux_amd64.tar.gz", DownloadURL: "http://example.com/myapp.tar.gz"},
+				},
+			}, nil
+		},
+		// Pinned tag v99.99.99 is not found.
+		getReleaseByTagFn: func(_ context.Context, _, tag string) (ports.Release, error) {
+			return ports.Release{}, fmt.Errorf("release %q not found in %s", tag, "owner/repo")
+		},
+	}
+
+	var snapshotCalled bool
+	o.FS = &mockFsPort{
+		snapshotFn: func(_ context.Context, _, _ string) (string, error) {
+			snapshotCalled = true
+			return "snap", nil
+		},
+	}
+
+	// Must not panic.
+	res, err := o.Run(context.Background(), RunOpts{
+		Version:        "99.99.99",
+		AllowDowngrade: true,
+	})
+	if err != nil {
+		t.Fatalf("want nil error (terminal Result surfaces failure), got %v", err)
+	}
+	if res.Kind != KindFailedUnrecoverable {
+		t.Fatalf("want KindFailedUnrecoverable, got %s", res.Kind)
+	}
+	if !strings.Contains(res.Reason, "not found") {
+		t.Fatalf("want Reason containing %q, got %q", "not found", res.Reason)
+	}
+	if snapshotCalled {
+		t.Fatal("snapshot must not be taken when version resolution fails (no rollback noise)")
+	}
+}
+
+// TestRun_NoPanicOnTargetWithVPrefix asserts that opts.Version with a leading
+// "v" is normalized correctly and does not panic. The version "v0.4.0" is
+// treated as "0.4.0" after normalization.
+// Reproduces B2: the v-prefix normalization was missing before the fix,
+// causing the version comparison to diverge and potentially trigger a panic
+// in rollback through an unexpected nil-Clock path.
+func TestRun_NoPanicOnTargetWithVPrefix(t *testing.T) {
+	// Reproduces B2
+
+	cfg := defaultConfig()
+	cfg.CurrentVersion = "0.3.0"
+	o := baseOrchestrator(cfg)
+	// Latest is 0.5.0; opts.Version="v0.4.0" is a downgrade (0.4.0 < 0.5.0).
+	// With AllowDowngrade=true the orchestrator proceeds, normalizing "v0.4.0"
+	// to "0.4.0" internally. targetVer must equal "0.4.0" (no "v" prefix).
+	o.HTTP = releaseVersion("myapp-", "0.5.0")
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: true, Version: "0.4.0"}, nil
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{
+		Version:        "v0.4.0",
+		AllowDowngrade: true,
+	})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	// KindOK: the v-prefix was stripped, the downgrade was allowed, health passed.
+	if res.Kind != KindOK {
+		t.Fatalf("want KindOK after v-prefix normalization, got %s", res.Kind)
+	}
+	// targetVer must have been normalized: To should not carry the leading "v".
+	if strings.HasPrefix(res.To, "v") {
+		t.Fatalf("want To without leading 'v' after normalization, got %q", res.To)
+	}
+}
+
+// TestRollback_HandlesNilManifest asserts that calling rollback with a nil
+// Clock on the Orchestrator does not panic and returns a valid Result.
+// This directly exercises the B2 defensive nil-check for the Clock port that
+// was added to prevent panics in manually-wired Orchestrators.
+// Reproduces B2
+func TestRollback_HandlesNilManifest(t *testing.T) {
+	// Reproduces B2
+
+	cfg := defaultConfig()
+	cfg.DataRoot = t.TempDir()
+	o := &Orchestrator{
+		Cfg:      cfg,
+		FS:       &mockFsPort{},
+		Migrator: migrations.New(),
+		Clock:    nil, // nil Clock: B2 fix must use fallback time.
+		mkdirAll: os.MkdirAll,
+		openFile: os.OpenFile,
+	}
+
+	// Invoke rollback directly: failedAt=StateDownloadBinary with a valid snapshotID
+	// so the restore branch runs. FS.Restore succeeds => KindRolledBack.
+	cause := errors.New("synthetic cause for B2 test")
+	res, err := o.rollback(context.Background(), StateDownloadBinary, "snap-b2", "0.5.0", "0.4.0", cause)
+	if err != nil {
+		t.Fatalf("rollback must return nil error, got %v", err)
+	}
+	if res.Kind != KindRolledBack {
+		t.Fatalf("want KindRolledBack, got %s", res.Kind)
+	}
+	if res.From != "0.4.0" {
+		t.Fatalf("want From=%q, got %q", "0.4.0", res.From)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B3: target-version respected with skipVerify
+// ---------------------------------------------------------------------------
+
+// TestRun_TargetVersionRespectedWithSkipVerify asserts that when opts.Version
+// is set and Cfg.SkipVerify=true, the resolved targetVer is opts.Version (not
+// silently overwritten by latest) AND the asset downloaded is the pinned
+// release's asset (not the latest release's). The B3 fix ensures
+// resolveTargetVersion calls GetReleaseByTag for the pinned version, so the
+// asset list surfaced to the downstream download phase belongs to the pinned
+// tag.
+// Reproduces B3
+func TestRun_TargetVersionRespectedWithSkipVerify(t *testing.T) {
+	// Reproduces B3
+
+	cfg := defaultConfig()
+	cfg.SkipVerify = true
+	cfg.CurrentVersion = "0.3.0"
+	o := baseOrchestrator(cfg)
+
+	// Use DISTINCT asset URLs for latest (v0.5.0) and pinned (v0.4.0). If the
+	// orchestrator regresses and uses the latest's assets when a target is
+	// pinned, the recorded download URL will not match the pinned one and the
+	// test fails. This is the precise B3 regression guard.
+	const (
+		latestAssetURL = "http://example.com/myapp-0.5.0.tar.gz"
+		pinnedAssetURL = "http://example.com/myapp-0.4.0.tar.gz"
+	)
+	o.HTTP = &mockHTTPPort{
+		latestReleaseFn: func(_ context.Context, _, _ string) (ports.Release, error) {
+			return ports.Release{
+				Tag: "myapp-v0.5.0",
+				Assets: []ports.Asset{
+					{Name: "myapp_0.5.0_linux_amd64.tar.gz", DownloadURL: latestAssetURL},
+				},
+			}, nil
+		},
+		getReleaseByTagFn: func(_ context.Context, _, tag string) (ports.Release, error) {
+			// Pinned tag v0.4.0 exists, with assets distinct from latest's.
+			return ports.Release{
+				Tag: tag,
+				Assets: []ports.Asset{
+					{Name: "myapp_0.4.0_linux_amd64.tar.gz", DownloadURL: pinnedAssetURL},
+				},
+			}, nil
+		},
+		downloadAssetFn: func(_ context.Context, _ string, w io.Writer) error {
+			_, err := w.Write([]byte("fake-binary-content"))
+			return err
+		},
+	}
+
+	// Capture which URL got passed to DownloadAsset.
+	var downloadedURL string
+	prevDownload := o.HTTP.(*mockHTTPPort).downloadAssetFn
+	o.HTTP.(*mockHTTPPort).downloadAssetFn = func(ctx context.Context, url string, w io.Writer) error {
+		downloadedURL = url
+		return prevDownload(ctx, url, w)
+	}
+
+	var verifyCalled bool
+	o.Cosign = &mockCosignPort{
+		verifyBundleFn: func(_ context.Context, _, _ string) error {
+			verifyCalled = true
+			return nil
+		},
+	}
+	o.Spawn = &mockSpawnPort{
+		healthCheckFn: func(_ context.Context, _ string, _ time.Duration) (ports.HealthResult, error) {
+			return ports.HealthResult{Ok: true, Version: "0.4.0"}, nil
+		},
+	}
+
+	res, err := o.Run(context.Background(), RunOpts{
+		Version:        "0.4.0",
+		AllowDowngrade: true,
+	})
+	if err != nil {
+		t.Fatalf("want nil error, got %v", err)
+	}
+	if res.Kind != KindOK {
+		t.Fatalf("want KindOK, got %s", res.Kind)
+	}
+	// The resolved targetVer must have been "0.4.0", not "0.5.0" (latest).
+	// Health check returns "0.4.0" so To reflects the target, not latest.
+	if res.To != "0.4.0" {
+		t.Fatalf("want To=%q (target), got %q (B3: target overwritten by latest)", "0.4.0", res.To)
+	}
+	if verifyCalled {
+		t.Fatal("cosign VerifyBundle must not be called when SkipVerify=true")
+	}
+	// CRITICAL B3 assertion: the downloaded asset URL must match the pinned
+	// release's asset (v0.4.0), not the latest's (v0.5.0). This is the bug
+	// that B3 specifically guarded against: silent latest-install when
+	// skipVerify was set with a target-version pinned.
+	if downloadedURL != pinnedAssetURL {
+		t.Fatalf("B3 regression: download URL = %q, want %q (orchestrator used latest's asset instead of pinned)",
+			downloadedURL, pinnedAssetURL)
+	}
+}
+
+// TestRun_TargetNotFoundEvenWithSkipVerify asserts that when opts.Version
+// pinned to a version that is a downgrade from latest and AllowDowngrade=false,
+// the orchestrator returns an error (downgrade denied) even with SkipVerify=true.
+// The B3 fix guarantees the version resolution and downgrade guard run before
+// any skipVerify branch, so no silent latest-installation can occur.
+// Reproduces B3
+func TestRun_TargetNotFoundEvenWithSkipVerify(t *testing.T) {
+	// Reproduces B3
+
+	cfg := defaultConfig()
+	cfg.SkipVerify = true
+	cfg.CurrentVersion = "0.5.0"
+	o := baseOrchestrator(cfg)
+	// Latest is 0.5.0; opts.Version="0.4.0" is a downgrade, AllowDowngrade=false.
+	// Even with SkipVerify=true the downgrade guard must fire before any install.
+	o.HTTP = releaseVersion("myapp-", "0.5.0")
+
+	var snapshotCalled bool
+	o.FS = &mockFsPort{
+		snapshotFn: func(_ context.Context, _, _ string) (string, error) {
+			snapshotCalled = true
+			return "snap", nil
+		},
+	}
+
+	_, err := o.Run(context.Background(), RunOpts{
+		Version:        "0.4.0",
+		AllowDowngrade: false,
+	})
+	if err == nil {
+		t.Fatal("want error for downgrade without AllowDowngrade, even with SkipVerify=true")
+	}
+	if !strings.Contains(err.Error(), "older than latest") {
+		t.Fatalf("want error about downgrade, got %q", err.Error())
+	}
+	if snapshotCalled {
+		t.Fatal("snapshot must not be taken when downgrade is denied (B3: pre-snapshot guard must fire)")
 	}
 }

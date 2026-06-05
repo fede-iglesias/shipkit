@@ -11,12 +11,17 @@ import (
 
 // mockHTTP is a compile-time proof that HTTPPort is implementable.
 type mockHTTP struct {
-	latestReleaseFunc func(ctx context.Context, repo, tagPrefix string) (ports.Release, error)
-	downloadAssetFunc func(ctx context.Context, url string, w io.Writer) error
+	latestReleaseFunc   func(ctx context.Context, repo, tagPrefix string) (ports.Release, error)
+	getReleaseByTagFunc func(ctx context.Context, repo, tag string) (ports.Release, error)
+	downloadAssetFunc   func(ctx context.Context, url string, w io.Writer) error
 }
 
 func (m *mockHTTP) LatestRelease(ctx context.Context, repo, tagPrefix string) (ports.Release, error) {
 	return m.latestReleaseFunc(ctx, repo, tagPrefix)
+}
+
+func (m *mockHTTP) GetReleaseByTag(ctx context.Context, repo, tag string) (ports.Release, error) {
+	return m.getReleaseByTagFunc(ctx, repo, tag)
 }
 
 func (m *mockHTTP) DownloadAsset(ctx context.Context, url string, w io.Writer) error {
